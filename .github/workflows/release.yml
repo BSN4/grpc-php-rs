@@ -34,7 +34,7 @@ jobs:
         php: ['8.2', '8.3', '8.4', '8.5']
         arch: ['x86_64', 'arm64']
         ts: ['nts', 'zts']
-        libc: ['glibc', 'musl']
+        libc: ['glibc']
     steps:
       - uses: actions/checkout@v4
 
@@ -42,11 +42,7 @@ jobs:
         id: docker
         run: |
           PHP_MINOR="${{ matrix.php }}"
-          if [[ "${{ matrix.libc }}" == "musl" && "${{ matrix.ts }}" == "zts" ]]; then
-            echo "image=php:${PHP_MINOR}-zts-alpine" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ matrix.libc }}" == "musl" && "${{ matrix.ts }}" == "nts" ]]; then
-            echo "image=php:${PHP_MINOR}-cli-alpine" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ matrix.libc }}" == "glibc" && "${{ matrix.ts }}" == "zts" ]]; then
+          if [[ "${{ matrix.ts }}" == "zts" ]]; then
             echo "image=php:${PHP_MINOR}-zts" >> "$GITHUB_OUTPUT"
           else
             echo "image=php:${PHP_MINOR}-cli" >> "$GITHUB_OUTPUT"
@@ -62,11 +58,7 @@ jobs:
               set -e
 
               # Install build dependencies (PHP headers already at /usr/local/include/php/)
-              if command -v apk > /dev/null; then
-                apk add --no-cache curl gcc musl-dev make
-              else
-                apt-get update && apt-get install -y curl gcc make
-              fi
+              apt-get update && apt-get install -y curl gcc make libclang-dev
 
               # Install Rust
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y

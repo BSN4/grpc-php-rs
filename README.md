@@ -38,11 +38,11 @@ echo "extension=grpc" > $(php -r "echo PHP_CONFIG_FILE_SCAN_DIR;")/grpc.ini
 
 ## Supported Platforms
 
-| PHP | OS | Arch | Thread Safety | libc |
-|-----|-------|--------|---------------|------|
-| 8.2, 8.3, 8.4, 8.5 | Linux | x86_64 | NTS, ZTS | glibc |
-| 8.2, 8.3, 8.4, 8.5 | Linux | ARM64 | NTS, ZTS | musl |
-| 8.2, 8.3, 8.4, 8.5 | macOS | ARM64 | NTS | bsdlibc |
+| PHP | OS | Arch | Thread Safety |
+|-----|-------|--------|---------------|
+| 8.2, 8.3, 8.4, 8.5 | Linux | x86_64 | NTS, ZTS |
+| 8.2, 8.3, 8.4, 8.5 | Linux | ARM64 | NTS, ZTS |
+| 8.2, 8.3, 8.4, 8.5 | macOS | ARM64 | NTS |
 
 ## Usage
 
