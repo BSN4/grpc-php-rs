@@ -1,0 +1,6 @@
+.git
+target
+.claude
+.DS_Store
+*.swp
+*.swo

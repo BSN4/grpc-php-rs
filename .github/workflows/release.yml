@@ -1,0 +1,140 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" --draft --title "$GITHUB_REF_NAME" --generate-notes
+
+  build-linux:
+    needs: create-release
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.2', '8.3', '8.4', '8.5']
+        arch: ['x86_64', 'arm64']
+        ts: ['nts', 'zts']
+        libc: ['glibc', 'musl']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set Docker image
+        id: docker
+        run: |
+          PHP_MINOR="${{ matrix.php }}"
+          if [[ "${{ matrix.libc }}" == "musl" && "${{ matrix.ts }}" == "zts" ]]; then
+            echo "image=php:${PHP_MINOR}-zts-alpine" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ matrix.libc }}" == "musl" && "${{ matrix.ts }}" == "nts" ]]; then
+            echo "image=php:${PHP_MINOR}-cli-alpine" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ matrix.libc }}" == "glibc" && "${{ matrix.ts }}" == "zts" ]]; then
+            echo "image=php:${PHP_MINOR}-zts" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=php:${PHP_MINOR}-cli" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build in Docker
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/src" \
+            -w /src \
+            ${{ steps.docker.outputs.image }} \
+            sh -c '
+              set -e
+
+              # Install build dependencies
+              if command -v apk > /dev/null; then
+                apk add --no-cache curl gcc musl-dev php-dev
+              else
+                apt-get update && apt-get install -y curl gcc php-dev
+              fi
+
+              # Install Rust
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+              . "$HOME/.cargo/env"
+
+              # Build
+              cargo build --release
+
+              # Rename to grpc.so
+              cp target/release/libgrpc_php_rs.so /src/grpc.so
+            '
+
+      - name: Package
+        run: |
+          VERSION="${{ needs.create-release.outputs.version }}"
+          TS_SUFFIX=""
+          if [[ "${{ matrix.ts }}" == "zts" ]]; then
+            TS_SUFFIX="-zts"
+          fi
+          ASSET_NAME="php_grpc-${VERSION}_php${{ matrix.php }}-${{ matrix.arch }}-linux-${{ matrix.libc }}${TS_SUFFIX}.zip"
+          zip "${ASSET_NAME}" grpc.so
+          echo "ASSET_NAME=${ASSET_NAME}" >> "$GITHUB_ENV"
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$GITHUB_REF_NAME" "$ASSET_NAME"
+
+  build-macos:
+    needs: create-release
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.2', '8.3', '8.4', '8.5']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Package
+        run: |
+          VERSION="${{ needs.create-release.outputs.version }}"
+          cp target/release/libgrpc_php_rs.dylib grpc.so
+          ASSET_NAME="php_grpc-${VERSION}_php${{ matrix.php }}-arm64-darwin-bsdlibc.zip"
+          zip "${ASSET_NAME}" grpc.so
+          echo "ASSET_NAME=${ASSET_NAME}" >> "$GITHUB_ENV"
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$GITHUB_REF_NAME" "$ASSET_NAME"
+
+  publish-release:
+    needs: [create-release, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false

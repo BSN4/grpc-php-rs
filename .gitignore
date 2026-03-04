@@ -1,1 +1,46 @@
+# Build artifacts
 /target
+*.so
+*.dylib
+*.dll
+
+# Cargo
+/target/
+**/*.rs.bk
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# IDE / Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.settings/
+*.sublime-workspace
+*.sublime-project
+
+# Environment / secrets
+.env
+.env.*
+
+# Claude Code
+.claude/
+
+# Docker (not needed in repo, .dockerignore handles build context)
+# But ignore any local docker-compose overrides
+docker-compose.override.yml
+
+# PHP (vendor installed inside Docker only)
+/vendor/
+composer.lock
+
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini

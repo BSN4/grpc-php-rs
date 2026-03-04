@@ -96,7 +96,7 @@ impl GrpcChannel {
 
         // Enter the Tokio runtime context so hyper can find the reactor
         let rt = crate::runtime::get_runtime()
-            .map_err(|e| PhpException::from(e))?;
+            .map_err(PhpException::from)?;
         let _guard = rt.enter();
 
         // Use connect_lazy to avoid blocking in constructor
@@ -167,6 +167,11 @@ impl GrpcChannel {
     /// Returns the tonic channel (for internal use by Call).
     pub(crate) fn get_tonic_channel(&self) -> Option<Channel> {
         self.inner.as_ref().map(|i| i.channel.clone())
+    }
+
+    /// Returns the target URI string.
+    pub(crate) fn get_target_uri(&self) -> Option<String> {
+        self.inner.as_ref().map(|i| i.target.clone())
     }
 
     /// Returns the call plugin if composite credentials were used.

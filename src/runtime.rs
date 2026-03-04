@@ -1,42 +1,24 @@
-use parking_lot::Mutex;
+use std::sync::OnceLock;
+
 use tokio::runtime::Runtime;
 
 use crate::error::GrpcError;
 
-static RUNTIME: Mutex<Option<Runtime>> = Mutex::new(None);
+static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
 pub fn get_runtime() -> Result<&'static Runtime, GrpcError> {
-    // First, check if already initialized (fast path)
-    {
-        let guard = RUNTIME.lock();
-        if guard.is_some() {
-            // SAFETY: Once set, the Runtime is never removed or replaced.
-            // The Mutex ensures no concurrent mutation. We return a &'static ref
-            // because the static Mutex keeps the Runtime alive for 'static.
-            let ptr = guard.as_ref().map(|r| r as *const Runtime);
-            if let Some(p) = ptr {
-                return Ok(unsafe { &*p });
-            }
-        }
+    // OnceLock::get_or_try_init is unstable, so we use a two-step approach:
+    // 1. Fast path: already initialized
+    if let Some(rt) = RUNTIME.get() {
+        return Ok(rt);
     }
-
-    // Slow path: initialize
+    // 2. Slow path: build a runtime and try to set it (only one thread wins)
     let rt = Runtime::new().map_err(GrpcError::RuntimeInit)?;
-    let mut guard = RUNTIME.lock();
-    if guard.is_none() {
-        *guard = Some(rt);
-    }
-
-    // SAFETY: Same reasoning as above — once set, never removed.
-    let ptr = guard
-        .as_ref()
-        .map(|r| r as *const Runtime)
-        .ok_or_else(|| {
-            GrpcError::RuntimeInit(std::io::Error::other(
-                "runtime initialization failed",
-            ))
-        })?;
-    Ok(unsafe { &*ptr })
+    // If another thread beat us, our `rt` is dropped (harmless).
+    let _ = RUNTIME.set(rt);
+    RUNTIME
+        .get()
+        .ok_or_else(|| GrpcError::RuntimeInit(std::io::Error::other("runtime init failed")))
 }
 
 #[cfg(test)]

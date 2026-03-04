@@ -1,0 +1,18 @@
+{
+    "name": "bsn4/grpc",
+    "type": "php-ext",
+    "license": "MIT",
+    "description": "Rust-based gRPC extension for PHP — drop-in replacement for ext-grpc",
+    "homepage": "https://github.com/BSN4/grpc-php-rs",
+    "require": {
+        "php": ">=8.2"
+    },
+    "php-ext": {
+        "extension-name": "grpc",
+        "priority": 80,
+        "support-zts": true,
+        "support-nts": true,
+        "os-families-exclude": ["windows"],
+        "download-url-method": ["pre-packaged-binary"]
+    }
+}

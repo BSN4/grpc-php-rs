@@ -6,6 +6,7 @@ use ext_php_rs::prelude::*;
 use ext_php_rs::types::{ArrayKey, ZendCallable, ZendHashTable, ZendObject, Zval};
 use http::uri::PathAndQuery;
 use parking_lot::Mutex;
+use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 
 use crate::channel::GrpcChannel;
@@ -108,7 +109,9 @@ fn parse_metadata(ht: &ZendHashTable) -> Vec<(String, String)> {
 }
 
 /// Build a metadata array for PHP from a tonic MetadataMap.
-fn metadata_to_php(map: &tonic::metadata::MetadataMap) -> ZBox<ZendHashTable> {
+fn metadata_to_php(
+    map: &tonic::metadata::MetadataMap,
+) -> Result<ZBox<ZendHashTable>, GrpcError> {
     let mut ht = ZendHashTable::new();
     for key_and_value in map.iter() {
         if let tonic::metadata::KeyAndValueRef::Ascii(key, value) = key_and_value {
@@ -120,20 +123,27 @@ fn metadata_to_php(map: &tonic::metadata::MetadataMap) -> ZBox<ZendHashTable> {
                     if let Some(arr) = existing_zval.array() {
                         let mut new_arr = ZendHashTable::new();
                         for (_k, v) in arr.iter() {
-                            let _ = new_arr.push(v.shallow_clone());
+                            new_arr
+                                .push(v.shallow_clone())
+                                .map_err(|e| GrpcError::InvalidArg(format!("metadata build: {e}")))?;
                         }
-                        let _ = new_arr.push(val_str.to_string());
-                        let _ = ht.insert(key_str, new_arr);
+                        new_arr
+                            .push(val_str.to_string())
+                            .map_err(|e| GrpcError::InvalidArg(format!("metadata build: {e}")))?;
+                        ht.insert(key_str, new_arr)
+                            .map_err(|e| GrpcError::InvalidArg(format!("metadata build: {e}")))?;
                     }
                 } else {
                     let mut arr = ZendHashTable::new();
-                    let _ = arr.push(val_str.to_string());
-                    let _ = ht.insert(key_str, arr);
+                    arr.push(val_str.to_string())
+                        .map_err(|e| GrpcError::InvalidArg(format!("metadata build: {e}")))?;
+                    ht.insert(key_str, arr)
+                        .map_err(|e| GrpcError::InvalidArg(format!("metadata build: {e}")))?;
                 }
             }
         }
     }
-    ht
+    Ok(ht)
 }
 
 /// Async result from a gRPC call.
@@ -150,10 +160,11 @@ type CallResult = (
 pub struct GrpcCall {
     channel: Channel,
     method: String,
+    target: String,
     deadline_usec: i64,
     host_override: Option<String>,
     call_plugin: Option<Arc<Mutex<Option<Zval>>>>,
-    cancelled: bool,
+    cancel_token: CancellationToken,
 }
 
 #[php_impl]
@@ -169,22 +180,27 @@ impl GrpcCall {
             PhpException::from(GrpcError::InvalidArg("Channel has been closed".into()))
         })?;
 
+        let target = channel
+            .get_target_uri()
+            .unwrap_or_default();
+
         let call_plugin = channel.get_call_plugin();
 
         Ok(Self {
             channel: tonic_channel,
             method,
+            target,
             deadline_usec: deadline.get_usec(),
             host_override,
             call_plugin,
-            cancelled: false,
+            cancel_token: CancellationToken::new(),
         })
     }
 
     /// Starts a batch of operations.
     #[php(name = "startBatch")]
     pub fn start_batch(&mut self, ops: &ZendHashTable) -> PhpResult<ZBox<ZendObject>> {
-        if self.cancelled {
+        if self.cancel_token.is_cancelled() {
             return Err(PhpException::from(GrpcError::Status {
                 code: 1, // CANCELLED
                 message: "Call has been cancelled".into(),
@@ -210,6 +226,7 @@ impl GrpcCall {
         let send_metadata = batch.send_metadata;
         let send_message = batch.send_message;
         let deadline_usec = self.deadline_usec;
+        let cancel_token = self.cancel_token.clone();
 
         let result: Result<CallResult, GrpcError> = rt.block_on(async move {
             // Build the path
@@ -246,24 +263,33 @@ impl GrpcCall {
                 }
             }
 
-            // Make the unary call using the raw codec
+            // Make the unary call using the raw codec, with cancellation support
             let mut grpc_client = tonic::client::Grpc::new(channel);
             grpc_client.ready().await.map_err(GrpcError::Transport)?;
 
-            let response = grpc_client
-                .unary(request, path, RawBytesCodec)
-                .await;
+            let call_future = grpc_client.unary(request, path, RawBytesCodec);
 
-            match response {
-                Ok(resp) => {
-                    let (resp_metadata, body, _extensions) = resp.into_parts();
-                    Ok((Some(resp_metadata), Some(body), None, 0i32, String::new()))
+            // Race the gRPC call against the cancellation token
+            tokio::select! {
+                response = call_future => {
+                    match response {
+                        Ok(resp) => {
+                            let (resp_metadata, body, _extensions) = resp.into_parts();
+                            Ok((Some(resp_metadata), Some(body), None, 0i32, String::new()))
+                        }
+                        Err(status) => {
+                            let code = status.code() as i32;
+                            let msg = status.message().to_string();
+                            let md = status.metadata().clone();
+                            Ok((None, None, Some(md), code, msg))
+                        }
+                    }
                 }
-                Err(status) => {
-                    let code = status.code() as i32;
-                    let msg = status.message().to_string();
-                    let md = status.metadata().clone();
-                    Ok((None, None, Some(md), code, msg))
+                () = cancel_token.cancelled() => {
+                    Err(GrpcError::Status {
+                        code: 1,
+                        message: "Call cancelled".into(),
+                    })
                 }
             }
         });
@@ -276,34 +302,55 @@ impl GrpcCall {
 
         if batch.recv_initial_metadata {
             if let Some(ref md) = initial_metadata {
-                let _ = result_obj.set_property("metadata", metadata_to_php(md));
+                result_obj
+                    .set_property("metadata", metadata_to_php(md).map_err(PhpException::from)?)
+                    .map_err(|e: ext_php_rs::error::Error| PhpException::default(format!("set metadata: {e}")))?;
             } else {
-                let _ = result_obj.set_property("metadata", ZendHashTable::new());
+                result_obj
+                    .set_property("metadata", ZendHashTable::new())
+                    .map_err(|e: ext_php_rs::error::Error| PhpException::default(format!("set metadata: {e}")))?;
             }
         }
 
         if batch.recv_message {
-            if let Some(ref bytes) = body {
-                let _ = result_obj.set_property("message", bytes.to_vec());
+            if let Some(bytes) = body {
+                // Binary<u8> creates a PHP string from raw bytes via set_binary().
+                // Vec::from(Bytes) is zero-copy when Bytes has sole ownership.
+                let bin: ext_php_rs::binary::Binary<u8> = Vec::from(bytes).into();
+                result_obj
+                    .set_property("message", bin)
+                    .map_err(|e: ext_php_rs::error::Error| PhpException::default(format!("set message: {e}")))?;
             } else {
                 let mut null_zval = Zval::new();
                 null_zval.set_null();
-                let _ = result_obj.set_property("message", null_zval);
+                result_obj
+                    .set_property("message", null_zval)
+                    .map_err(|e: ext_php_rs::error::Error| PhpException::default(format!("set message: {e}")))?;
             }
         }
 
         if batch.recv_status {
             let mut status_obj = ZendObject::new_stdclass();
-            let _ = status_obj.set_property("code", status_code as i64);
-            let _ = status_obj.set_property("details", status_message);
+            status_obj
+                .set_property("code", status_code as i64)
+                .map_err(|e: ext_php_rs::error::Error| PhpException::default(format!("set status code: {e}")))?;
+            status_obj
+                .set_property("details", status_message)
+                .map_err(|e: ext_php_rs::error::Error| PhpException::default(format!("set status details: {e}")))?;
 
             if let Some(ref md) = trailing_metadata {
-                let _ = status_obj.set_property("metadata", metadata_to_php(md));
+                status_obj
+                    .set_property("metadata", metadata_to_php(md).map_err(PhpException::from)?)
+                    .map_err(|e: ext_php_rs::error::Error| PhpException::default(format!("set status metadata: {e}")))?;
             } else {
-                let _ = status_obj.set_property("metadata", ZendHashTable::new());
+                status_obj
+                    .set_property("metadata", ZendHashTable::new())
+                    .map_err(|e: ext_php_rs::error::Error| PhpException::default(format!("set status metadata: {e}")))?;
             }
 
-            let _ = result_obj.set_property("status", status_obj);
+            result_obj
+                .set_property("status", status_obj)
+                .map_err(|e: ext_php_rs::error::Error| PhpException::default(format!("set status: {e}")))?;
         }
 
         Ok(result_obj)
@@ -314,12 +361,12 @@ impl GrpcCall {
     pub fn get_peer(&self) -> String {
         self.host_override
             .clone()
-            .unwrap_or_else(|| "unknown".into())
+            .unwrap_or_else(|| self.target.clone())
     }
 
     /// Cancels the call.
     pub fn cancel(&mut self) {
-        self.cancelled = true;
+        self.cancel_token.cancel();
     }
 
     /// Sets call credentials.

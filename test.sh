@@ -94,8 +94,19 @@ cmd_zts() {
         -e FRANKENPHP_WORKERS="/app/tests/test_zts_stress.php=4" \
         "${IMAGE}:zts"
 
-    # Wait for the server to be ready
-    sleep 3
+    # Wait for the container to be ready (poll instead of fixed sleep)
+    info "Waiting for FrankenPHP to start"
+    local retries=30
+    while ! docker exec "$CONTAINER" php -r "echo 'ok';" &>/dev/null; do
+        retries=$((retries - 1))
+        if [ "$retries" -le 0 ]; then
+            fail "Container failed to start within 15s"
+            docker logs "$CONTAINER"
+            docker rm -f "$CONTAINER" 2>/dev/null || true
+            exit 1
+        fi
+        sleep 0.5
+    done
 
     info "Verifying extension loaded in ZTS container"
     docker exec "$CONTAINER" php -r "echo 'grpc loaded: ' . (extension_loaded('grpc') ? 'yes' : 'no') . PHP_EOL;"

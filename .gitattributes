@@ -1,0 +1,4 @@
+/.github        export-ignore
+/tests          export-ignore
+/test.sh        export-ignore
+/.dockerignore  export-ignore
