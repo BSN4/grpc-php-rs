@@ -24,6 +24,8 @@ grpc-php-rs solves both by using a pure Rust stack: [tonic](https://github.com/h
 pie install bsn4/grpc
 ```
 
+> **Note:** Requires PIE 1.4.0+ (pre-packaged binary support). PIE 1.3.x will fail.
+
 ### Manual download
 
 Download the appropriate `.so` from the [latest release](https://github.com/BSN4/grpc-php-rs/releases/latest), then:
