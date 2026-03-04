@@ -61,11 +61,11 @@ jobs:
             sh -c '
               set -e
 
-              # Install build dependencies
+              # Install build dependencies (PHP headers already at /usr/local/include/php/)
               if command -v apk > /dev/null; then
-                apk add --no-cache curl gcc musl-dev php-dev
+                apk add --no-cache curl gcc musl-dev make
               else
-                apt-get update && apt-get install -y curl gcc php-dev
+                apt-get update && apt-get install -y curl gcc make
               fi
 
               # Install Rust
