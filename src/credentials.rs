@@ -35,7 +35,9 @@ impl GrpcChannelCredentials {
         pem_private_key: Option<String>,
         pem_cert_chain: Option<String>,
     ) -> PhpResult<Self> {
-        let mut tls = ClientTlsConfig::new();
+        // Always enable webpki-roots (Mozilla CA bundle) as fallback.
+        // tonic does NOT auto-enable it even with the `tls-webpki-roots` feature.
+        let mut tls = ClientTlsConfig::new().with_webpki_roots();
 
         // Apply root certs: parameter takes priority, then default, then system roots
         let roots = pem_root_certs.or_else(|| {
@@ -89,7 +91,7 @@ impl GrpcChannelCredentials {
     /// Creates default SSL credentials (system root CAs or custom default PEM).
     #[php(name = "createDefault")]
     pub fn create_default() -> Self {
-        let mut tls = ClientTlsConfig::new();
+        let mut tls = ClientTlsConfig::new().with_webpki_roots();
 
         let guard = DEFAULT_ROOTS_PEM.lock();
         if let Some(ref pem) = *guard {

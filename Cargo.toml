@@ -24,7 +24,7 @@ print_stderr = "deny"
 
 [dependencies]
 ext-php-rs = { version = "0.15", features = ["closure"] }
-tonic = { version = "0.12", default-features = false, features = ["transport", "tls", "tls-webpki-roots"] }
+tonic = { version = "0.14", default-features = false, features = ["transport", "tls-ring", "tls-webpki-roots"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 tokio-util = "0.7"
 parking_lot = "0.12"

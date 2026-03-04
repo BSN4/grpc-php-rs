@@ -32,7 +32,15 @@ impl GrpcChannel {
     ///
     /// PHP signature: __construct(string $target, array $args)
     pub fn __construct(target: String, args: &ZendHashTable) -> PhpResult<Self> {
-        let mut endpoint = Endpoint::from_shared(target.clone())
+        // The C gRPC extension accepts bare "host:port" targets, but tonic needs
+        // a URI with scheme. Prepend "https://" if no scheme is present.
+        let uri_target = if target.contains("://") {
+            target.clone()
+        } else {
+            format!("https://{target}")
+        };
+
+        let mut endpoint = Endpoint::from_shared(uri_target)
             .map_err(|e| PhpException::from(GrpcError::InvalidUri(e.to_string())))?;
 
         let mut tls_config = None;
@@ -87,7 +95,9 @@ impl GrpcChannel {
                     .map_err(|e| PhpException::from(GrpcError::InvalidArg(e.to_string())))?;
             }
 
-        // Apply TLS config
+        // Apply TLS config.
+        // Always call tls_config() when credentials were provided — tonic requires
+        // explicit TLS config even for https:// URLs (it doesn't auto-enable).
         if let Some(tls) = tls_config {
             endpoint = endpoint
                 .tls_config(tls)

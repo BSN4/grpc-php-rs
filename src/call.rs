@@ -31,6 +31,8 @@ struct BatchOps {
     recv_initial_metadata: bool,
     recv_message: bool,
     recv_status: bool,
+    has_send_ops: bool,
+    has_recv_ops: bool,
 }
 
 /// Helper to extract a string key from an ArrayKey.
@@ -74,18 +76,13 @@ fn invoke_call_plugin(
         .try_call(vec![&service_url.to_string()])
         .map_err(|e| GrpcError::CallbackFailed(format!("{e:?}")))?;
 
-    // The callback should return an array of metadata key-value pairs
-    let mut metadata = Vec::new();
+    // The callback returns metadata as key => value or key => [values]
+    // (Google Cloud SDK returns e.g. ['authorization' => ['Bearer xxx']])
     if let Some(ht) = result.array() {
-        for (key, val) in ht.iter() {
-            if let Some(k) = array_key_to_string(&key)
-                && let Some(v) = val.string() {
-                    metadata.push((k, v));
-                }
-        }
+        Ok(parse_metadata(ht))
+    } else {
+        Ok(Vec::new())
     }
-
-    Ok(metadata)
 }
 
 /// Parse metadata from a PHP array (ZendHashTable).
@@ -165,6 +162,9 @@ pub struct GrpcCall {
     host_override: Option<String>,
     call_plugin: Option<Arc<Mutex<Option<Zval>>>>,
     cancel_token: CancellationToken,
+    /// Buffered send data from a send-only startBatch (split send/recv pattern).
+    pending_metadata: Vec<(String, String)>,
+    pending_message: Option<Bytes>,
 }
 
 #[php_impl]
@@ -194,10 +194,17 @@ impl GrpcCall {
             host_override,
             call_plugin,
             cancel_token: CancellationToken::new(),
+            pending_metadata: Vec::new(),
+            pending_message: None,
         })
     }
 
     /// Starts a batch of operations.
+    ///
+    /// The C gRPC extension supports split send/recv patterns where `startBatch`
+    /// is called twice: once with send ops only (metadata + message), then again
+    /// with recv ops only (response + status). We handle this by buffering send
+    /// data and deferring the actual gRPC call until recv ops are present.
     #[php(name = "startBatch")]
     pub fn start_batch(&mut self, ops: &ZendHashTable) -> PhpResult<ZBox<ZendObject>> {
         if self.cancel_token.is_cancelled() {
@@ -210,94 +217,49 @@ impl GrpcCall {
         // Step 1: Parse the ops array on the PHP thread
         let batch = self.parse_ops(ops)?;
 
-        // Step 2: Invoke call credentials plugin on PHP thread if set
+        // Send-only batch: buffer the data and return an empty result.
+        // The actual gRPC call will be made when recv ops arrive.
+        if batch.has_send_ops && !batch.has_recv_ops {
+            self.pending_metadata = batch.send_metadata;
+            self.pending_message = batch.send_message;
+
+            // Invoke call credentials plugin now (must run on PHP thread)
+            if let Some(ref plugin) = self.call_plugin {
+                let plugin_md = invoke_call_plugin(plugin, &self.method)
+                    .map_err(PhpException::from)?;
+                self.pending_metadata.extend(plugin_md);
+            }
+
+            return Ok(ZendObject::new_stdclass());
+        }
+
+        // Determine the metadata and message to send.
+        // If this batch has its own send ops, use those.
+        // Otherwise, use any buffered data from a previous send-only batch.
+        let send_metadata = if batch.has_send_ops {
+            batch.send_metadata
+        } else {
+            std::mem::take(&mut self.pending_metadata)
+        };
+
+        let send_message = if batch.has_send_ops {
+            batch.send_message
+        } else {
+            self.pending_message.take()
+        };
+
+        // Invoke call credentials plugin on PHP thread if not already done
         let mut plugin_metadata = Vec::new();
-        if let Some(ref plugin) = self.call_plugin {
+        if batch.has_send_ops && let Some(ref plugin) = self.call_plugin {
             plugin_metadata = invoke_call_plugin(plugin, &self.method)
                 .map_err(PhpException::from)?;
         }
 
-        // Step 3: Build the gRPC request and execute in tokio
-        let rt = get_runtime().map_err(PhpException::from)?;
+        // Execute the gRPC call
+        let result = self.execute_call(send_metadata, plugin_metadata, send_message)?;
+        let (initial_metadata, body, trailing_metadata, status_code, status_message) = result;
 
-        // Collect all Send-safe data before entering async block
-        let channel = self.channel.clone();
-        let method = self.method.clone();
-        let send_metadata = batch.send_metadata;
-        let send_message = batch.send_message;
-        let deadline_usec = self.deadline_usec;
-        let cancel_token = self.cancel_token.clone();
-
-        let result: Result<CallResult, GrpcError> = rt.block_on(async move {
-            // Build the path
-            let path = PathAndQuery::try_from(method.as_str())
-                .map_err(|e| GrpcError::InvalidArg(format!("invalid method path: {e}")))?;
-
-            // Build the request
-            let message = send_message.unwrap_or_default();
-            let mut request = tonic::Request::new(message);
-
-            // Apply metadata
-            let req_metadata = request.metadata_mut();
-            for (key, value) in &send_metadata {
-                if let Ok(name) = tonic::metadata::MetadataKey::from_bytes(key.as_bytes())
-                    && let Ok(val) = value.parse() {
-                        req_metadata.insert(name, val);
-                    }
-            }
-            for (key, value) in &plugin_metadata {
-                if let Ok(name) = tonic::metadata::MetadataKey::from_bytes(key.as_bytes())
-                    && let Ok(val) = value.parse() {
-                        req_metadata.insert(name, val);
-                    }
-            }
-
-            // Apply deadline/timeout
-            if deadline_usec < i64::MAX && deadline_usec > 0 {
-                let now_usec = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0i64, |d| d.as_micros() as i64);
-                let timeout_usec = deadline_usec.saturating_sub(now_usec);
-                if timeout_usec > 0 {
-                    request.set_timeout(std::time::Duration::from_micros(timeout_usec as u64));
-                }
-            }
-
-            // Make the unary call using the raw codec, with cancellation support
-            let mut grpc_client = tonic::client::Grpc::new(channel);
-            grpc_client.ready().await.map_err(GrpcError::Transport)?;
-
-            let call_future = grpc_client.unary(request, path, RawBytesCodec);
-
-            // Race the gRPC call against the cancellation token
-            tokio::select! {
-                response = call_future => {
-                    match response {
-                        Ok(resp) => {
-                            let (resp_metadata, body, _extensions) = resp.into_parts();
-                            Ok((Some(resp_metadata), Some(body), None, 0i32, String::new()))
-                        }
-                        Err(status) => {
-                            let code = status.code() as i32;
-                            let msg = status.message().to_string();
-                            let md = status.metadata().clone();
-                            Ok((None, None, Some(md), code, msg))
-                        }
-                    }
-                }
-                () = cancel_token.cancelled() => {
-                    Err(GrpcError::Status {
-                        code: 1,
-                        message: "Call cancelled".into(),
-                    })
-                }
-            }
-        });
-
-        let (initial_metadata, body, trailing_metadata, status_code, status_message) =
-            result.map_err(PhpException::from)?;
-
-        // Step 4: Build the result stdClass
+        // Build the result stdClass
         let mut result_obj = ZendObject::new_stdclass();
 
         if batch.recv_initial_metadata {
@@ -378,6 +340,89 @@ impl GrpcCall {
 }
 
 impl GrpcCall {
+    /// Execute the gRPC unary call in the tokio runtime.
+    fn execute_call(
+        &self,
+        send_metadata: Vec<(String, String)>,
+        plugin_metadata: Vec<(String, String)>,
+        send_message: Option<Bytes>,
+    ) -> PhpResult<CallResult> {
+        let rt = get_runtime().map_err(PhpException::from)?;
+
+        let channel = self.channel.clone();
+        let method = self.method.clone();
+        let deadline_usec = self.deadline_usec;
+        let cancel_token = self.cancel_token.clone();
+
+        let result: Result<CallResult, GrpcError> = rt.block_on(async move {
+            // Build the path
+            let path = PathAndQuery::try_from(method.as_str())
+                .map_err(|e| GrpcError::InvalidArg(format!("invalid method path: {e}")))?;
+
+            // Build the request
+            let message = send_message.unwrap_or_default();
+            let mut request = tonic::Request::new(message);
+
+            // Apply metadata
+            let req_metadata = request.metadata_mut();
+            for (key, value) in &send_metadata {
+                if let Ok(name) = tonic::metadata::MetadataKey::from_bytes(key.as_bytes())
+                    && let Ok(val) = value.parse() {
+                        req_metadata.insert(name, val);
+                    }
+            }
+            for (key, value) in &plugin_metadata {
+                if let Ok(name) = tonic::metadata::MetadataKey::from_bytes(key.as_bytes())
+                    && let Ok(val) = value.parse() {
+                        req_metadata.insert(name, val);
+                    }
+            }
+
+            // Apply deadline/timeout
+            if deadline_usec < i64::MAX && deadline_usec > 0 {
+                let now_usec = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0i64, |d| d.as_micros() as i64);
+                let timeout_usec = deadline_usec.saturating_sub(now_usec);
+                if timeout_usec > 0 {
+                    request.set_timeout(std::time::Duration::from_micros(timeout_usec as u64));
+                }
+            }
+
+            // Make the unary call using the raw codec, with cancellation support
+            let mut grpc_client = tonic::client::Grpc::new(channel);
+            grpc_client.ready().await.map_err(GrpcError::Transport)?;
+
+            let call_future = grpc_client.unary(request, path, RawBytesCodec);
+
+            // Race the gRPC call against the cancellation token
+            tokio::select! {
+                response = call_future => {
+                    match response {
+                        Ok(resp) => {
+                            let (resp_metadata, body, _extensions) = resp.into_parts();
+                            Ok((Some(resp_metadata), Some(body), None, 0i32, String::new()))
+                        }
+                        Err(status) => {
+                            let code = status.code() as i32;
+                            let msg = status.message().to_string();
+                            let md = status.metadata().clone();
+                            Ok((None, None, Some(md), code, msg))
+                        }
+                    }
+                }
+                () = cancel_token.cancelled() => {
+                    Err(GrpcError::Status {
+                        code: 1,
+                        message: "Call cancelled".into(),
+                    })
+                }
+            }
+        });
+
+        result.map_err(PhpException::from)
+    }
+
     /// Parse the ops array into a structured BatchOps.
     fn parse_ops(&self, ops: &ZendHashTable) -> PhpResult<BatchOps> {
         let mut batch = BatchOps {
@@ -386,6 +431,8 @@ impl GrpcCall {
             recv_initial_metadata: false,
             recv_message: false,
             recv_status: false,
+            has_send_ops: false,
+            has_recv_ops: false,
         };
 
         for (key, val) in ops.iter() {
@@ -393,31 +440,37 @@ impl GrpcCall {
 
             match op_code {
                 OP_SEND_INITIAL_METADATA => {
+                    batch.has_send_ops = true;
                     if let Some(ht) = val.array() {
                         batch.send_metadata = parse_metadata(ht);
                     }
                 }
                 OP_SEND_MESSAGE => {
-                    // The C extension accepts either a string directly or
-                    // an array with 'message' key
-                    if let Some(s) = val.string() {
-                        batch.send_message = Some(Bytes::from(s.into_bytes()));
+                    batch.has_send_ops = true;
+                    // Protobuf messages are binary — use zend_str() (raw bytes)
+                    // instead of string() which rejects non-UTF-8 data.
+                    if let Some(zs) = val.zend_str() {
+                        batch.send_message = Some(Bytes::copy_from_slice(zs.as_bytes()));
                     } else if let Some(ht) = val.array()
                         && let Some(msg_zval) = ht.get("message")
-                            && let Some(s) = msg_zval.string() {
-                                batch.send_message = Some(Bytes::from(s.into_bytes()));
+                            && let Some(zs) = msg_zval.zend_str() {
+                                batch.send_message = Some(Bytes::copy_from_slice(zs.as_bytes()));
                             }
                 }
                 OP_SEND_CLOSE_FROM_CLIENT => {
+                    batch.has_send_ops = true;
                     // Acknowledged — close is implicit in unary
                 }
                 OP_RECV_INITIAL_METADATA => {
+                    batch.has_recv_ops = true;
                     batch.recv_initial_metadata = true;
                 }
                 OP_RECV_MESSAGE => {
+                    batch.has_recv_ops = true;
                     batch.recv_message = true;
                 }
                 OP_RECV_STATUS_ON_CLIENT => {
+                    batch.has_recv_ops = true;
                     batch.recv_status = true;
                 }
                 _ => {
