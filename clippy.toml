@@ -1,0 +1,140 @@
+# Clippy configuration for lighthouse
+# Strict rules for async safety, error handling, and best practices
+
+# =============================================================================
+# AWAIT POINTS - let's avoid deadlocks
+# =============================================================================
+
+[[await-holding-invalid-types]]
+path = "generational_box::GenerationalRef"
+reason = "Reads should not be held over an await point"
+
+[[await-holding-invalid-types]]
+path = "generational_box::GenerationalRefMut"
+reason = "Write should not be held over an await point"
+
+[[await-holding-invalid-types]]
+path = "dioxus_signals::WriteLock"
+reason = "Write should not be held over an await point"
+
+# Async locks - use message passing instead (async locks isn't the sync locks don't be confused)
+[[disallowed-types]]
+path = "tokio::sync::Mutex"
+reason = "async locks are forbidden - use channels/message passing instead"
+
+[[disallowed-types]]
+path = "tokio::sync::RwLock"
+reason = "async locks are forbidden - use channels/message passing instead"
+
+# Standard library sync types - use parking_lot instead (sync locks isn't the async locks don't be confused)
+[[disallowed-types]]
+path = "std::sync::Mutex"
+reason = "use parking_lot::Mutex instead for better performance and features"
+
+[[disallowed-types]]
+path = "std::sync::RwLock"
+reason = "use parking_lot::RwLock instead for better performance and features"
+
+# -----------------------------------------------------------------------------
+# Path Types
+# -----------------------------------------------------------------------------
+
+[[disallowed-types]]
+path = "std::path::PathBuf"
+reason = "Use camino::Utf8PathBuf for UTF-8 paths"
+
+[[disallowed-types]]
+path = "std::path::Path"
+reason = "Use camino::Utf8Path for UTF-8 paths"
+
+# -----------------------------------------------------------------------------
+# We can afford fs_err (and thus, helpful error messages)
+# -----------------------------------------------------------------------------
+
+[[disallowed-types]]
+path = "std::fs::OpenOptions"
+reason = "use fs_err::OpenOptions instead for better error messages"
+
+[[disallowed-methods]]
+path = "std::fs::read_to_string"
+reason = "use fs_err so error messages contain paths"
+
+[[disallowed-methods]]
+path = "std::fs::write"
+reason = "use fs_err so error messages contain paths"
+
+[[disallowed-methods]]
+path = "std::fs::read"
+reason = "use fs_err so error messages contain paths"
+
+[[disallowed-methods]]
+path = "std::fs::read_dir"
+reason = "use fs_err so error messages contain paths"
+
+[[disallowed-methods]]
+path = "std::fs::create_dir"
+reason = "use fs_err so error messages contain paths"
+
+[[disallowed-methods]]
+path = "std::fs::create_dir_all"
+reason = "use fs_err so error messages contain paths"
+
+[[disallowed-methods]]
+path = "std::fs::remove_file"
+reason = "use fs_err so error messages contain paths"
+
+[[disallowed-methods]]
+path = "std::fs::remove_dir"
+reason = "use fs_err so error messages contain paths"
+
+[[disallowed-methods]]
+path = "std::fs::remove_dir_all"
+reason = "use fs_err so error messages contain paths"
+
+[[disallowed-methods]]
+path = "std::fs::copy"
+reason = "use fs_err so error messages contain paths"
+
+[[disallowed-methods]]
+path = "std::fs::rename"
+reason = "use fs_err so error messages contain paths"
+
+[[disallowed-methods]]
+path = "std::fs::metadata"
+reason = "use fs_err so error messages contain paths"
+
+[[disallowed-methods]]
+path = "std::fs::symlink_metadata"
+reason = "use fs_err so error messages contain paths"
+
+[[disallowed-methods]]
+path = "std::fs::canonicalize"
+reason = "use fs_err so error messages contain paths"
+
+[[disallowed-methods]]
+path = "std::fs::hard_link"
+reason = "use fs_err so error messages contain paths"
+
+[[disallowed-methods]]
+path = "std::fs::soft_link"
+reason = "use fs_err so error messages contain paths"
+
+[[disallowed-methods]]
+path = "std::fs::File::open"
+reason = "use fs_err so error messages contain paths"
+
+[[disallowed-methods]]
+path = "std::fs::File::create"
+reason = "use fs_err so error messages contain paths"
+
+# -----------------------------------------------------------------------------
+# Don't block the runtime
+# -----------------------------------------------------------------------------
+
+[[disallowed-methods]]
+path = "std::thread::sleep"
+reason = "don't block the runtime! use tokio::time::sleep"
+
+[[disallowed-types]]
+path = "std::net::TcpStream"
+reason = "don't block the runtime! use tokio::net::TcpStream"

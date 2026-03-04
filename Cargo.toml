@@ -1,0 +1,32 @@
+[package]
+name = "grpc-php-rs"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "grpc_php_rs"
+crate-type = ["cdylib"]
+
+[lints.clippy]
+await_holding_invalid_type = "deny"
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
+disallowed_types = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+
+[dependencies]
+ext-php-rs = { version = "0.15", features = ["closure"] }
+tonic = { version = "0.12", default-features = false, features = ["transport", "tls", "tls-webpki-roots"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+parking_lot = "0.12"
+bytes = "1"
+http = "1"
+thiserror = "2"

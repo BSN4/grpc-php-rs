@@ -1,0 +1,9 @@
+{
+    frankenphp
+    order php_server before file_server
+}
+
+:8080 {
+    root * /app/tests
+    php_server
+}
