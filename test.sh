@@ -4,6 +4,7 @@ set -euo pipefail
 IMAGE="grpc-php-rs-test"
 CONTAINER="grpc-rs-zts-test"
 DOCKERFILE="tests/Dockerfile"
+COMPOSE_INTEGRATION="docker-compose.integration.yml"
 
 # Colors
 RED='\033[0;31m'
@@ -22,14 +23,17 @@ usage() {
 Usage: ./test.sh [command]
 
 Commands:
-  build     Build the Docker image (compiles Rust extension for Linux)
-  rust      Run cargo test inside Docker
-  smoke     Run PHP smoke test (no network needed)
-  ssl       Run PHP SSL channel test (needs internet)
-  firestore Run Firestore client compatibility test (fake endpoint, no creds)
-  zts       Run ZTS stress test with FrankenPHP + concurrent curl
-  all       build + rust + smoke + firestore (default)
-  shell     Drop into PHP CLI with extension loaded
+  build       Build the Docker image (compiles Rust extension for Linux)
+  rust        Run cargo test inside Docker
+  smoke       Run PHP smoke test (no network needed)
+  ssl         Run PHP SSL channel test (needs internet)
+  firestore   Run Firestore client compatibility test (fake endpoint, no creds)
+  zts         Run ZTS stress test with FrankenPHP + concurrent curl
+  temporal    Run Temporal SDK integration test (starts temporalio/auto-setup)
+  otel        Run OpenTelemetry integration test (starts otel-collector-contrib)
+  integration Run both temporal + otel integration tests
+  all         build + rust + smoke + firestore (default)
+  shell       Drop into PHP CLI with extension loaded
 EOF
 }
 
@@ -147,6 +151,51 @@ cmd_zts() {
     fi
 }
 
+cmd_temporal() {
+    info "Running Temporal SDK integration test"
+    warn "This starts temporalio/auto-setup — may take ~30s on first run"
+    local COMPOSE="docker compose -f $COMPOSE_INTEGRATION"
+    trap "$COMPOSE down --volumes 2>/dev/null || true" EXIT
+    DOCKER_BUILDKIT=1 $COMPOSE build test-temporal
+    $COMPOSE run --rm test-temporal
+    $COMPOSE down --volumes
+    trap - EXIT
+    ok "Temporal integration test passed"
+}
+
+cmd_otel() {
+    info "Running OpenTelemetry integration test"
+    local COMPOSE="docker compose -f $COMPOSE_INTEGRATION"
+    trap "$COMPOSE down --volumes 2>/dev/null || true" EXIT
+    DOCKER_BUILDKIT=1 $COMPOSE build test-otel
+    $COMPOSE run --rm test-otel
+    $COMPOSE down --volumes
+    trap - EXIT
+    ok "OpenTelemetry integration test passed"
+}
+
+cmd_integration() {
+    info "Running all integration tests (Temporal + OpenTelemetry)"
+    warn "This starts temporalio/auto-setup + otel-collector-contrib"
+    local COMPOSE="docker compose -f $COMPOSE_INTEGRATION"
+    trap "$COMPOSE down --volumes 2>/dev/null || true" EXIT
+
+    info "Building integration test images"
+    DOCKER_BUILDKIT=1 $COMPOSE build test-temporal test-otel
+
+    info "Running Temporal integration test (waits for server healthy)"
+    $COMPOSE run --rm test-temporal
+    ok "Temporal test passed"
+
+    info "Running OpenTelemetry integration test (waits for collector healthy)"
+    $COMPOSE run --rm test-otel
+    ok "OpenTelemetry test passed"
+
+    $COMPOSE down --volumes
+    trap - EXIT
+    ok "All integration tests passed"
+}
+
 cmd_shell() {
     info "Dropping into PHP CLI with extension loaded"
     docker run --rm -it "${IMAGE}:nts" bash
@@ -165,12 +214,15 @@ command="${1:-all}"
 case "$command" in
     build) cmd_build ;;
     rust)  cmd_rust ;;
-    smoke)     cmd_smoke ;;
-    ssl)       cmd_ssl ;;
-    firestore) cmd_firestore ;;
-    zts)       cmd_zts ;;
-    all)   cmd_all ;;
-    shell) cmd_shell ;;
+    smoke)       cmd_smoke ;;
+    ssl)         cmd_ssl ;;
+    firestore)   cmd_firestore ;;
+    zts)         cmd_zts ;;
+    temporal)    cmd_temporal ;;
+    otel)        cmd_otel ;;
+    integration) cmd_integration ;;
+    all)         cmd_all ;;
+    shell)       cmd_shell ;;
     -h|--help|help) usage ;;
     *)
         echo "Unknown command: $command"
