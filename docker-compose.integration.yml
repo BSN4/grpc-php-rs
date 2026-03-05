@@ -1,0 +1,41 @@
+services:
+  temporal:
+    image: temporalio/auto-setup:latest
+    environment:
+      - DB=sqlite
+    # Uses the image's built-in HEALTHCHECK (temporal operator cluster health)
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    volumes:
+      - ./tests/integration/otel-collector.yaml:/etc/otelcol-contrib/config.yaml
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    healthcheck:
+      # health_check extension exposes :13133
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:13133"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  test-temporal:
+    build:
+      context: .
+      dockerfile: tests/Dockerfile
+      target: test-integration-temporal
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+
+  test-otel:
+    build:
+      context: .
+      dockerfile: tests/Dockerfile
+      target: test-integration-otel
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+    environment:
+      - OTEL_ADDRESS=otel-collector:4317
