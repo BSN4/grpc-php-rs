@@ -1,22 +1,42 @@
 services:
+  postgresql:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
   temporal:
     image: temporalio/auto-setup:latest
     environment:
-      - DB=sqlite
-    # Uses the image's built-in HEALTHCHECK (temporal operator cluster health)
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=postgresql
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    healthcheck:
+      # temporal CLI is bundled in the image; uses the container's bound IP
+      test: ["CMD-SHELL", "temporal operator cluster health --address $(hostname -i):7233 2>/dev/null | grep -q SERVING"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest
     volumes:
       - ./tests/integration/otel-collector.yaml:/etc/otelcol-contrib/config.yaml
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
-    healthcheck:
-      # health_check extension exposes :13133
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:13133"]
-      interval: 3s
-      timeout: 5s
-      retries: 10
-      start_period: 5s
+    # The image is distroless (no shell/wget) so a Docker healthcheck is not
+    # possible.  test_otel.php handles retry-until-ready internally.
 
   test-temporal:
     build:
@@ -36,6 +56,6 @@ services:
       target: test-integration-otel
     depends_on:
       otel-collector:
-        condition: service_healthy
+        condition: service_started
     environment:
       - OTEL_ADDRESS=otel-collector:4317

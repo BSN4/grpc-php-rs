@@ -94,6 +94,12 @@ WORKDIR /app
 # Builds on test-nts (which already has Composer, the grpc extension, git, unzip)
 FROM test-nts AS test-integration-base
 
+# ext-sockets is required by spiral/roadrunner-worker (temporal/sdk transitive dep)
+# ext-protobuf C extension avoids pure-PHP deprecation warnings on PHP 8.5
+RUN docker-php-ext-install sockets \
+    && pecl install protobuf \
+    && docker-php-ext-enable protobuf
+
 COPY tests/integration/composer.json /integration/composer.json
 RUN composer install --working-dir=/integration --prefer-dist --no-interaction --quiet
 COPY tests/integration/ /integration/
