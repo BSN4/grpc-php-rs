@@ -28,7 +28,10 @@ impl Decoder for RawBytesDecoder {
     fn decode(&mut self, src: &mut tonic::codec::DecodeBuf<'_>) -> Result<Option<Self::Item>, Self::Error> {
         let remaining = src.remaining();
         if remaining == 0 {
-            return Ok(None);
+            // Return empty Bytes for zero-length messages (e.g. google.protobuf.Empty).
+            // Returning None would signal "no message" and cause tonic to throw
+            // "Missing response message."
+            return Ok(Some(Bytes::new()));
         }
         Ok(Some(src.copy_to_bytes(remaining)))
     }

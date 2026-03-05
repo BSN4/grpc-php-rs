@@ -401,7 +401,10 @@ impl GrpcCall {
                     match response {
                         Ok(resp) => {
                             let (resp_metadata, body, _extensions) = resp.into_parts();
-                            Ok((Some(resp_metadata), Some(body), None, 0i32, String::new()))
+                            // Return None for empty bodies (e.g. google.protobuf.Empty)
+                            // so PHP receives null for the message — matching C ext behavior.
+                            let body = if body.is_empty() { None } else { Some(body) };
+                            Ok((Some(resp_metadata), body, None, 0i32, String::new()))
                         }
                         Err(status) => {
                             let code = status.code() as i32;
