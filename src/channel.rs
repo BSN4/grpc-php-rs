@@ -32,21 +32,11 @@ impl GrpcChannel {
     ///
     /// PHP signature: __construct(string $target, array $args)
     pub fn __construct(target: String, args: &ZendHashTable) -> PhpResult<Self> {
-        // The C gRPC extension accepts bare "host:port" targets, but tonic needs
-        // a URI with scheme. Prepend "https://" if no scheme is present.
-        let uri_target = if target.contains("://") {
-            target.clone()
-        } else {
-            format!("https://{target}")
-        };
-
-        let mut endpoint = Endpoint::from_shared(uri_target)
-            .map_err(|e| PhpException::from(GrpcError::InvalidUri(e.to_string())))?;
-
         let mut tls_config = None;
         let mut call_plugin = None;
 
-        // Extract credentials from args
+        // Extract credentials from args first — we need to know if TLS is
+        // required before building the URI.
         if let Some(creds_zval) = args.get("credentials") {
             // If credentials is null, it means insecure (from createInsecure())
             if !creds_zval.is_null()
@@ -67,6 +57,19 @@ impl GrpcChannel {
                     }
                 }
         }
+
+        // The C gRPC extension accepts bare "host:port" targets, but tonic needs
+        // a URI with scheme. Use https:// for TLS credentials, http:// for insecure.
+        let uri_target = if target.contains("://") {
+            target.clone()
+        } else if tls_config.is_some() {
+            format!("https://{target}")
+        } else {
+            format!("http://{target}")
+        };
+
+        let mut endpoint = Endpoint::from_shared(uri_target)
+            .map_err(|e| PhpException::from(GrpcError::InvalidUri(e.to_string())))?;
 
         // Extract keepalive settings
         if let Some(val) = args.get("grpc.keepalive_time_ms")
