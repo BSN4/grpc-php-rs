@@ -78,7 +78,6 @@ echo "extension=grpc" > $(php -r "echo PHP_CONFIG_FILE_SCAN_DIR;")/grpc.ini
 | 8.2, 8.3, 8.4, 8.5 | Linux | x86_64 | NTS, ZTS |
 | 8.2, 8.3, 8.4, 8.5 | Linux | ARM64 | NTS, ZTS |
 | 8.2, 8.3, 8.4, 8.5 | macOS | ARM64 | NTS |
-| 8.2, 8.3, 8.4, 8.5 | Windows | x86_64 | NTS |
 
 ## Usage
 

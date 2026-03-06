@@ -1,4 +1,3 @@
-#![cfg_attr(windows, feature(abi_vectorcall))]
 #![deny(
     clippy::unwrap_used,
     clippy::expect_used,
