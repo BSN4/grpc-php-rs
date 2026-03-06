@@ -18,13 +18,46 @@ grpc-php-rs solves both by using a pure Rust stack: [tonic](https://github.com/h
 
 ## Install
 
-### Via PIE (recommended)
+### Docker (recommended)
+
+One line in your Dockerfile — no build tools needed:
+
+```dockerfile
+FROM php:8.5-cli
+
+COPY --from=ghcr.io/bsn4/grpc-php-rs:latest-php8.5 /usr/local/ /usr/local/
+```
+
+For ZTS (FrankenPHP, Swoole, etc.):
+
+```dockerfile
+COPY --from=ghcr.io/bsn4/grpc-php-rs:latest-php8.5-zts /usr/local/ /usr/local/
+```
+
+Available tags: `latest-php8.2`, `latest-php8.3`, `latest-php8.4`, `latest-php8.5` (add `-zts` for thread-safe). Version-pinned tags like `v0.1.2-php8.5` are also available.
+
+### Via PIE
 
 ```sh
 pie install bsn4/grpc
 ```
 
 > **Note:** Requires PIE 1.4.0+ (pre-packaged binary support). PIE 1.3.x will fail.
+
+In Docker (when PIE 1.4.0 stable isn't available yet):
+
+```dockerfile
+RUN apt-get update && apt-get install -y --no-install-recommends curl unzip git \
+    && git clone --branch 1.4.x --depth 1 https://github.com/php/pie.git /tmp/pie \
+    && curl -sLo /usr/local/bin/composer https://getcomposer.org/download/latest-stable/composer.phar \
+    && chmod +x /usr/local/bin/composer \
+    && cd /tmp/pie && composer install --no-dev --quiet \
+    && /tmp/pie/bin/pie install bsn4/grpc \
+    && rm -rf /tmp/pie /usr/local/bin/composer \
+    && apt-get purge -y git unzip \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+```
 
 ### Manual download
 
