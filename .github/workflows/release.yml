@@ -142,8 +142,6 @@ jobs:
 
       - name: Build
         run: cargo +nightly build --release
-        env:
-          RUSTFLAGS: "-C linker=rust-lld"
 
       - name: Package
         shell: bash
