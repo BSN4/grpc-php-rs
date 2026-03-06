@@ -90,8 +90,28 @@ COPY tests/Caddyfile.test /etc/caddy/Caddyfile
 WORKDIR /app
 
 # ---------------------------------------------------------------------------
-# Stage 5: Integration test base — Temporal SDK
-# Builds on test-nts (which already has Composer, the grpc extension, git, unzip)
+# Stage 5: Build the gRPC test server (standalone Rust crate)
+FROM rust:1 AS test-server-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY tests/server/ .
+RUN cargo build --release
+
+# ---------------------------------------------------------------------------
+# Stage 6: Memory leak test runner
+FROM test-nts AS test-leak
+
+# No Composer deps needed — uses raw protobuf encoding
+COPY --from=test-server-builder /build/target/release/grpc-test-server /usr/local/bin/grpc-test-server
+COPY tests/leak_test.php /app/tests/leak_test.php
+
+CMD ["sh", "-c", "grpc-test-server & sleep 1 && php tests/leak_test.php"]
+
+# ---------------------------------------------------------------------------
+# Stage 7: Integration test base — Temporal SDK (builds on test-nts)
 FROM test-nts AS test-integration-base
 
 # ext-sockets is required by spiral/roadrunner-worker (temporal/sdk transitive dep)
@@ -105,13 +125,12 @@ RUN composer install --working-dir=/integration --prefer-dist --no-interaction -
 COPY tests/integration/ /integration/
 
 # ---------------------------------------------------------------------------
-# Stage 6: Integration test — Temporal
+# Stage 8: Integration test — Temporal
 FROM test-integration-base AS test-integration-temporal
 CMD ["php", "/integration/test_temporal.php"]
 
 # ---------------------------------------------------------------------------
-# Stage 7: Integration test — OpenTelemetry
-# Uses extension API directly — no additional Composer deps needed
+# Stage 9: Integration test — OpenTelemetry
 FROM test-nts AS test-integration-otel
 COPY tests/integration/test_otel.php /integration/test_otel.php
 CMD ["php", "/integration/test_otel.php"]

@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package grpc.testing;
+
+service TestService {
+  rpc Echo(Payload) returns (Payload);
+  rpc EmptyResponse(Payload) returns (Empty);
+  rpc LargeResponse(Payload) returns (Payload);
+  rpc ErrorResponse(Payload) returns (Payload);
+}
+
+message Payload {
+  bytes body = 1;
+}
+
+message Empty {}

@@ -29,6 +29,7 @@ Commands:
   ssl         Run PHP SSL channel test (needs internet)
   firestore   Run Firestore client compatibility test (fake endpoint, no creds)
   zts         Run ZTS stress test with FrankenPHP + concurrent curl
+  leak        Run memory leak test with local gRPC test server
   temporal    Run Temporal SDK integration test (starts temporalio/auto-setup)
   otel        Run OpenTelemetry integration test (starts otel-collector-contrib)
   integration Run both temporal + otel integration tests
@@ -151,6 +152,18 @@ cmd_zts() {
     fi
 }
 
+cmd_leak() {
+    info "Building test-leak stage (test server + extension + leak test)"
+    DOCKER_BUILDKIT=1 docker build \
+        --target test-leak \
+        -t "${IMAGE}:leak" \
+        -f "$DOCKERFILE" .
+
+    info "Running memory leak tests"
+    docker run --rm "${IMAGE}:leak"
+    ok "Memory leak test passed"
+}
+
 cmd_temporal() {
     info "Running Temporal SDK integration test"
     warn "This starts temporalio/auto-setup — may take ~30s on first run"
@@ -218,6 +231,7 @@ case "$command" in
     ssl)         cmd_ssl ;;
     firestore)   cmd_firestore ;;
     zts)         cmd_zts ;;
+    leak)        cmd_leak ;;
     temporal)    cmd_temporal ;;
     otel)        cmd_otel ;;
     integration) cmd_integration ;;
