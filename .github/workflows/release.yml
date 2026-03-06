@@ -136,11 +136,14 @@ jobs:
         with:
           php-version: ${{ matrix.php }}
 
+      # ext-php-rs requires nightly for abi_vectorcall on Windows
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@nightly
 
       - name: Build
-        run: cargo build --release
+        run: cargo +nightly build --release
+        env:
+          RUSTFLAGS: "-C linker=rust-lld"
 
       - name: Package
         shell: bash
