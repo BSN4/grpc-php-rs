@@ -22,6 +22,11 @@ dbg_macro = "deny"
 print_stdout = "deny"
 print_stderr = "deny"
 
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
+
 [dependencies]
 ext-php-rs = { version = "0.15", features = ["closure"] }
 tonic = { version = "0.14", default-features = false, features = ["transport", "tls-ring", "tls-webpki-roots"] }
