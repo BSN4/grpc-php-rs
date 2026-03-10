@@ -11,7 +11,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 info()  { echo -e "${CYAN}===${NC} $*"; }
 ok()    { echo -e "${GREEN}  ✓${NC} $*"; }
@@ -23,83 +23,79 @@ usage() {
 Usage: ./test.sh [command]
 
 Commands:
-  build       Build the Docker image (compiles Rust extension for Linux)
-  rust        Run cargo test inside Docker
-  smoke       Run PHP smoke test (no network needed)
-  ssl         Run PHP SSL channel test (needs internet)
-  firestore   Run Firestore client compatibility test (fake endpoint, no creds)
-  zts         Run ZTS stress test with FrankenPHP + concurrent curl
+  all         Build + run smoke + compat tests (default)
+  smoke       Run PHP smoke test (API surface, no network)
+  compat      Run grpc/grpc library compatibility test (Issue #4)
+  firestore   Run Firestore client compatibility test
   leak        Run memory leak test with local gRPC test server
+  zts         Run ZTS stress test with FrankenPHP + concurrent requests
   temporal    Run Temporal SDK integration test (starts temporalio/auto-setup)
-  otel        Run OpenTelemetry integration test (starts otel-collector-contrib)
+  otel        Run OpenTelemetry integration test (starts otel-collector)
   integration Run both temporal + otel integration tests
-  all         build + rust + smoke + firestore (default)
   shell       Drop into PHP CLI with extension loaded
 EOF
 }
 
+# --- Helpers ---
+
+# Build one or more Docker targets. Docker caches shared stages (builder, test-base)
+# so only the first build is slow.
+build_target() {
+    local target="$1"
+    local tag="${IMAGE}:${target}"
+    info "Building ${target}"
+    DOCKER_BUILDKIT=1 docker build \
+        --target "$target" \
+        -t "$tag" \
+        -f "$DOCKERFILE" . \
+        --quiet > /dev/null
+}
+
+run_target() {
+    local target="$1"
+    docker run --rm "${IMAGE}:${target}"
+}
+
 # --- Commands ---
 
-cmd_build() {
-    info "Building builder stage (Rust compile + cargo test)"
-    DOCKER_BUILDKIT=1 docker build \
-        --target builder \
-        -t "${IMAGE}:builder" \
-        -f "$DOCKERFILE" .
-
-    info "Building test-nts stage (PHP NTS)"
-    DOCKER_BUILDKIT=1 docker build \
-        --target test-nts \
-        -t "${IMAGE}:nts" \
-        -f "$DOCKERFILE" .
-
-    ok "Docker images built"
-}
-
-cmd_rust() {
-    info "Running cargo test inside Docker"
-    # The builder stage already runs cargo test during build.
-    # Rebuild the builder stage to re-run tests (cached if nothing changed).
-    DOCKER_BUILDKIT=1 docker build \
-        --target builder \
-        -t "${IMAGE}:builder" \
-        -f "$DOCKERFILE" .
-    ok "cargo test passed"
-}
-
 cmd_smoke() {
-    info "Running PHP smoke test (NTS)"
-    docker run --rm "${IMAGE}:nts" php tests/test_smoke.php
+    build_target test-smoke
+    info "Running smoke test"
+    run_target test-smoke
     ok "Smoke test passed"
 }
 
-cmd_ssl() {
-    info "Running PHP SSL channel test (NTS, needs internet)"
-    docker run --rm "${IMAGE}:nts" php tests/test_channel_ssl.php
-    ok "SSL test passed"
+cmd_compat() {
+    build_target test-compat
+    info "Running grpc/grpc compatibility test"
+    run_target test-compat
+    ok "Compatibility test passed"
 }
 
 cmd_firestore() {
-    info "Running Firestore client compatibility test (fake endpoint)"
-    docker run --rm "${IMAGE}:nts" php tests/test_firestore_fake.php
-    ok "Firestore compatibility test passed"
+    build_target test-firestore
+    info "Running Firestore compatibility test"
+    run_target test-firestore
+    ok "Firestore test passed"
+}
+
+cmd_leak() {
+    build_target test-leak
+    info "Running memory leak tests"
+    run_target test-leak
+    ok "Memory leak test passed"
 }
 
 cmd_zts() {
-    info "Building test-zts stage (FrankenPHP ZTS)"
-    DOCKER_BUILDKIT=1 docker build \
-        --target test-zts \
-        -t "${IMAGE}:zts" \
-        -f "$DOCKERFILE" .
+    build_target test-zts
 
     info "Starting FrankenPHP with 4 workers"
     docker rm -f "$CONTAINER" 2>/dev/null || true
     docker run -d --name "$CONTAINER" \
         -p 8099:8080 \
         -e FRANKENPHP_WORKERS="/app/tests/test_zts_stress.php=4" \
-        "${IMAGE}:zts"
+        "${IMAGE}:test-zts"
 
-    # Wait for the container to be ready (poll instead of fixed sleep)
     info "Waiting for FrankenPHP to start"
     local retries=30
     while ! docker exec "$CONTAINER" php -r "echo 'ok';" &>/dev/null; do
@@ -120,10 +116,6 @@ cmd_zts() {
     docker exec "$CONTAINER" php /app/tests/test_smoke.php
 
     info "Concurrent stress test (200 requests, 10 concurrent)"
-    echo "    If this completes without crashing, ZTS is safe."
-    echo ""
-
-    local failed=0
     for i in $(seq 1 10); do
         for j in $(seq 1 20); do
             curl -sf http://localhost:8099/test_zts_stress.php > /dev/null &
@@ -134,34 +126,18 @@ cmd_zts() {
 
     echo ""
     info "Checking container still alive"
+    local failed=0
     if docker exec "$CONTAINER" php -r "echo 'alive';"; then
         echo ""
         ok "Container survived 200 concurrent gRPC+TLS requests under ZTS!"
-        ok "No SIGSEGV — grpc-php-rs is thread-safe."
     else
         echo ""
         fail "Container crashed — check: docker logs $CONTAINER"
         failed=1
     fi
 
-    info "Cleaning up ZTS container"
     docker rm -f "$CONTAINER" 2>/dev/null || true
-
-    if [ "$failed" -ne 0 ]; then
-        exit 1
-    fi
-}
-
-cmd_leak() {
-    info "Building test-leak stage (test server + extension + leak test)"
-    DOCKER_BUILDKIT=1 docker build \
-        --target test-leak \
-        -t "${IMAGE}:leak" \
-        -f "$DOCKERFILE" .
-
-    info "Running memory leak tests"
-    docker run --rm "${IMAGE}:leak"
-    ok "Memory leak test passed"
+    [ "$failed" -eq 0 ] || exit 1
 }
 
 cmd_temporal() {
@@ -189,35 +165,32 @@ cmd_otel() {
 
 cmd_integration() {
     info "Running all integration tests (Temporal + OpenTelemetry)"
-    warn "This starts temporalio/auto-setup + otel-collector-contrib"
     local COMPOSE="docker compose -f $COMPOSE_INTEGRATION"
     trap "$COMPOSE down --volumes 2>/dev/null || true" EXIT
-
-    info "Building integration test images"
     DOCKER_BUILDKIT=1 $COMPOSE build test-temporal test-otel
-
-    info "Running Temporal integration test (waits for server healthy)"
     $COMPOSE run --rm test-temporal
     ok "Temporal test passed"
-
-    info "Running OpenTelemetry integration test (waits for collector healthy)"
     $COMPOSE run --rm test-otel
     ok "OpenTelemetry test passed"
-
     $COMPOSE down --volumes
     trap - EXIT
     ok "All integration tests passed"
 }
 
 cmd_shell() {
+    build_target test-base
     info "Dropping into PHP CLI with extension loaded"
-    docker run --rm -it "${IMAGE}:nts" bash
+    docker run --rm -it "${IMAGE}:test-base" bash
 }
 
 cmd_all() {
-    cmd_build
+    info "Building and running all core tests"
+    echo ""
     cmd_smoke
-    cmd_firestore
+    echo ""
+    cmd_compat
+    echo ""
+    ok "All tests passed"
 }
 
 # --- Main ---
@@ -225,17 +198,15 @@ cmd_all() {
 command="${1:-all}"
 
 case "$command" in
-    build) cmd_build ;;
-    rust)  cmd_rust ;;
+    all)         cmd_all ;;
     smoke)       cmd_smoke ;;
-    ssl)         cmd_ssl ;;
+    compat)      cmd_compat ;;
     firestore)   cmd_firestore ;;
-    zts)         cmd_zts ;;
     leak)        cmd_leak ;;
+    zts)         cmd_zts ;;
     temporal)    cmd_temporal ;;
     otel)        cmd_otel ;;
     integration) cmd_integration ;;
-    all)         cmd_all ;;
     shell)       cmd_shell ;;
     -h|--help|help) usage ;;
     *)

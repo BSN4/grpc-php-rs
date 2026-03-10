@@ -32,6 +32,15 @@ pub use credentials::{GrpcCallCredentials, GrpcChannelCredentials};
 pub use timeval::GrpcTimeval;
 
 // ---------------------------------------------------------------------------
+// Return-type stripping — ext-php-rs always declares typed returns, but the
+// C extension has untyped methods.  PHP 8.5 enforces covariant return types,
+// so child classes in grpc/grpc (InterceptorChannel) fail if we declare types.
+// We strip them in the first RINIT after classes are registered in MINIT.
+// ---------------------------------------------------------------------------
+
+mod compat;
+
+// ---------------------------------------------------------------------------
 // Constants — registered via module startup
 // ---------------------------------------------------------------------------
 
@@ -119,4 +128,5 @@ pub fn get_module(module: ModuleBuilder) -> ModuleBuilder {
         .class::<GrpcChannelCredentials>()
         .class::<GrpcCallCredentials>()
         .class::<GrpcTimeval>()
+        .request_startup_function(compat::strip_return_types)
 }
