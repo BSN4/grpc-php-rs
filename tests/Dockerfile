@@ -84,6 +84,13 @@ RUN composer require --working-dir=/app google/cloud-firestore google/gax --pref
 CMD ["php", "tests/test_firestore_fake.php"]
 
 # ---------------------------------------------------------------------------
+# Stage 6b: google/grpc-gcp compatibility test
+FROM test-base AS test-grpc-gcp
+
+RUN composer require --working-dir=/app google/grpc-gcp:^0.4 google/gax --prefer-dist --no-interaction --quiet
+CMD ["php", "tests/test_grpc_gcp_compat.php"]
+
+# ---------------------------------------------------------------------------
 # Stage 7: ZTS (thread-safe) PHP via FrankenPHP
 FROM dunglas/frankenphp:1-php8.5 AS test-zts
 

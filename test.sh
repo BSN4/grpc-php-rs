@@ -26,6 +26,7 @@ Commands:
   all         Build + run smoke + compat tests (default)
   smoke       Run PHP smoke test (API surface, no network)
   compat      Run grpc/grpc library compatibility test (Issue #4)
+  grpc-gcp    Run google/grpc-gcp channel pool compatibility test
   firestore   Run Firestore client compatibility test
   leak        Run memory leak test with local gRPC test server
   zts         Run ZTS stress test with FrankenPHP + concurrent requests
@@ -70,6 +71,13 @@ cmd_compat() {
     info "Running grpc/grpc compatibility test"
     run_target test-compat
     ok "Compatibility test passed"
+}
+
+cmd_grpc_gcp() {
+    build_target test-grpc-gcp
+    info "Running google/grpc-gcp compatibility test"
+    run_target test-grpc-gcp
+    ok "grpc-gcp test passed"
 }
 
 cmd_firestore() {
@@ -201,6 +209,7 @@ case "$command" in
     all)         cmd_all ;;
     smoke)       cmd_smoke ;;
     compat)      cmd_compat ;;
+    grpc-gcp)    cmd_grpc_gcp ;;
     firestore)   cmd_firestore ;;
     leak)        cmd_leak ;;
     zts)         cmd_zts ;;
