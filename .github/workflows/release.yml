@@ -16,7 +16,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Extract version from tag
         id: version
         run: echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
@@ -36,7 +36,7 @@ jobs:
         ts: ['nts', 'zts']
         libc: ['glibc']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set Docker image
         id: docker
@@ -95,7 +95,7 @@ jobs:
       matrix:
         php: ['8.2', '8.3', '8.4', '8.5']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
@@ -125,7 +125,7 @@ jobs:
     needs: [create-release, build-linux, build-macos]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
