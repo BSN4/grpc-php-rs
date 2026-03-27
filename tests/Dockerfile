@@ -134,7 +134,9 @@ FROM test-base AS test-streaming
 COPY --from=test-server-builder /build/target/release/grpc-test-server /usr/local/bin/grpc-test-server
 COPY tests/test_streaming.php /app/tests/test_streaming.php
 
-CMD ["sh", "-c", "grpc-test-server & sleep 1 && php tests/test_streaming.php"]
+COPY tests/test_empty_response.php /app/tests/test_empty_response.php
+
+CMD ["sh", "-c", "grpc-test-server & sleep 1 && php tests/test_streaming.php && php tests/test_empty_response.php"]
 
 # ---------------------------------------------------------------------------
 # Stage 10: Integration test base — Temporal SDK

@@ -566,6 +566,7 @@ dependencies = [
  "parking_lot",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tonic",
 ]

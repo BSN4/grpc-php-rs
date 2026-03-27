@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut, Bytes};
-use tonic::codec::{Codec, Decoder, Encoder};
 use tonic::Status;
+use tonic::codec::{Codec, Decoder, Encoder};
 
 #[derive(Debug, Clone, Copy)]
 pub struct RawBytesCodec;
@@ -15,7 +15,11 @@ impl Encoder for RawBytesEncoder {
     type Item = Bytes;
     type Error = Status;
 
-    fn encode(&mut self, item: Self::Item, dst: &mut tonic::codec::EncodeBuf<'_>) -> Result<(), Self::Error> {
+    fn encode(
+        &mut self,
+        item: Self::Item,
+        dst: &mut tonic::codec::EncodeBuf<'_>,
+    ) -> Result<(), Self::Error> {
         dst.put(item);
         Ok(())
     }
@@ -25,7 +29,10 @@ impl Decoder for RawBytesDecoder {
     type Item = Bytes;
     type Error = Status;
 
-    fn decode(&mut self, src: &mut tonic::codec::DecodeBuf<'_>) -> Result<Option<Self::Item>, Self::Error> {
+    fn decode(
+        &mut self,
+        src: &mut tonic::codec::DecodeBuf<'_>,
+    ) -> Result<Option<Self::Item>, Self::Error> {
         let remaining = src.remaining();
         if remaining == 0 {
             // Return empty Bytes for zero-length messages (e.g. google.protobuf.Empty).

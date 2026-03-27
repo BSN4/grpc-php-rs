@@ -15,7 +15,7 @@
 use std::ffi::c_char;
 
 use ext_php_rs::ffi::{
-    zend_hash_str_find_ptr_lc, zend_internal_function, ZEND_ACC_HAS_RETURN_TYPE,
+    ZEND_ACC_HAS_RETURN_TYPE, zend_hash_str_find_ptr_lc, zend_internal_function,
 };
 use ext_php_rs::zend::ClassEntry;
 use parking_lot::Once;

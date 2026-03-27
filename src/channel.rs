@@ -40,22 +40,23 @@ impl GrpcChannel {
         if let Some(creds_zval) = args.get("credentials") {
             // If credentials is null, it means insecure (from createInsecure())
             if !creds_zval.is_null()
-                && let Some(creds) = creds_zval.extract::<&GrpcChannelCredentials>() {
-                    match &creds.inner {
-                        CredentialsInner::Ssl {
-                            tls_config: tls_cfg,
-                        } => {
-                            tls_config = Some(tls_cfg.clone());
-                        }
-                        CredentialsInner::Composite {
-                            tls_config: tls_cfg,
-                            call_plugin: plugin,
-                        } => {
-                            tls_config = Some(tls_cfg.clone());
-                            call_plugin = Some(Arc::clone(plugin));
-                        }
+                && let Some(creds) = creds_zval.extract::<&GrpcChannelCredentials>()
+            {
+                match &creds.inner {
+                    CredentialsInner::Ssl {
+                        tls_config: tls_cfg,
+                    } => {
+                        tls_config = Some(tls_cfg.clone());
+                    }
+                    CredentialsInner::Composite {
+                        tls_config: tls_cfg,
+                        call_plugin: plugin,
+                    } => {
+                        tls_config = Some(tls_cfg.clone());
+                        call_plugin = Some(Arc::clone(plugin));
                     }
                 }
+            }
         }
 
         // The C gRPC extension accepts bare "host:port" targets, but tonic needs
@@ -74,29 +75,34 @@ impl GrpcChannel {
         // Extract keepalive settings
         if let Some(val) = args.get("grpc.keepalive_time_ms")
             && let Some(ms) = val.long()
-                && ms > 0 {
-                    endpoint = endpoint.http2_keep_alive_interval(Duration::from_millis(ms as u64));
-                }
+            && ms > 0
+        {
+            endpoint = endpoint.http2_keep_alive_interval(Duration::from_millis(ms as u64));
+        }
 
         if let Some(val) = args.get("grpc.keepalive_timeout_ms")
             && let Some(ms) = val.long()
-                && ms > 0 {
-                    endpoint = endpoint.keep_alive_timeout(Duration::from_millis(ms as u64));
-                }
+            && ms > 0
+        {
+            endpoint = endpoint.keep_alive_timeout(Duration::from_millis(ms as u64));
+        }
 
         // Extract SSL target name override
         if let Some(val) = args.get("grpc.ssl_target_name_override")
             && let Some(name) = val.string()
-                && let Some(ref mut tls) = tls_config {
-                    *tls = tls.clone().domain_name(name);
-                }
+            && let Some(ref mut tls) = tls_config
+        {
+            *tls = tls.clone().domain_name(name);
+        }
 
         // Extract user agent
         if let Some(val) = args.get("grpc.primary_user_agent")
-            && let Some(ua) = val.string() {
-                endpoint = endpoint.user_agent(ua)
-                    .map_err(|e| PhpException::from(GrpcError::InvalidArg(e.to_string())))?;
-            }
+            && let Some(ua) = val.string()
+        {
+            endpoint = endpoint
+                .user_agent(ua)
+                .map_err(|e| PhpException::from(GrpcError::InvalidArg(e.to_string())))?;
+        }
 
         // Apply TLS config.
         // Always call tls_config() when credentials were provided — tonic requires
@@ -108,8 +114,7 @@ impl GrpcChannel {
         }
 
         // Enter the Tokio runtime context so hyper can find the reactor
-        let rt = crate::runtime::get_runtime()
-            .map_err(PhpException::from)?;
+        let rt = crate::runtime::get_runtime().map_err(PhpException::from)?;
         let _guard = rt.enter();
 
         // Use connect_lazy to avoid blocking in constructor

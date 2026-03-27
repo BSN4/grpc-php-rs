@@ -8,6 +8,8 @@ service TestService {
   rpc LargeResponse(Payload) returns (Payload);
   rpc ErrorResponse(Payload) returns (Payload);
   rpc StreamEcho(Payload) returns (stream Payload);
+  rpc CollectPayloads(stream Payload) returns (Payload);
+  rpc BidiEcho(stream Payload) returns (stream Payload);
 }
 
 message Payload {

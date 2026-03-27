@@ -206,6 +206,12 @@ cmd_all() {
     echo ""
     cmd_compat
     echo ""
+    cmd_grpc_gcp
+    echo ""
+    cmd_streaming
+    echo ""
+    cmd_leak
+    echo ""
     ok "All tests passed"
 }
 
