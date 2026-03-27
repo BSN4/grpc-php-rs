@@ -1,3 +1,4 @@
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status};
 
 pub mod pb {
@@ -12,6 +13,8 @@ pub struct TestServiceImpl;
 
 #[tonic::async_trait]
 impl TestService for TestServiceImpl {
+    type StreamEchoStream = ReceiverStream<Result<Payload, Status>>;
+
     async fn echo(&self, request: Request<Payload>) -> Result<Response<Payload>, Status> {
         Ok(Response::new(request.into_inner()))
     }
@@ -35,6 +38,25 @@ impl TestService for TestServiceImpl {
         _request: Request<Payload>,
     ) -> Result<Response<Payload>, Status> {
         Err(Status::internal("test error"))
+    }
+
+    async fn stream_echo(
+        &self,
+        request: Request<Payload>,
+    ) -> Result<Response<Self::StreamEchoStream>, Status> {
+        let payload = request.into_inner();
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+
+        tokio::spawn(async move {
+            // Send the payload back 3 times
+            for _ in 0..3 {
+                if tx.send(Ok(payload.clone())).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 }
 

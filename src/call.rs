@@ -24,10 +24,31 @@ const OP_RECV_INITIAL_METADATA: i64 = 4;
 const OP_RECV_MESSAGE: i64 = 5;
 const OP_RECV_STATUS_ON_CLIENT: i64 = 6;
 
+/// Trailing metadata + status from a completed stream.
+struct StreamTrailers {
+    code: i32,
+    message: String,
+    metadata: tonic::metadata::MetadataMap,
+}
+
+/// Active server streaming state — channels to a background tokio task
+/// that drives the `tonic::Streaming<Bytes>`.
+struct ServerStreamState {
+    /// Receives messages from the stream task. `Ok(None)` = end of stream.
+    msg_rx: tokio::sync::mpsc::Receiver<Result<Option<Bytes>, tonic::Status>>,
+    /// Initial metadata from response headers (taken on first RECV_INITIAL_METADATA).
+    initial_metadata: Option<tonic::metadata::MetadataMap>,
+    /// Cached trailers (populated when we see end-of-stream or error from msg_rx).
+    cached_trailers: Option<StreamTrailers>,
+    /// Receives trailers from the stream task after it finishes.
+    trailers_rx: Option<tokio::sync::oneshot::Receiver<StreamTrailers>>,
+}
+
 /// Parsed operations from the PHP batch array.
 struct BatchOps {
     send_metadata: Vec<(String, String)>,
     send_message: Option<Bytes>,
+    send_close: bool,
     recv_initial_metadata: bool,
     recv_message: bool,
     recv_status: bool,
@@ -165,6 +186,10 @@ pub struct GrpcCall {
     /// Buffered send data from a send-only startBatch (split send/recv pattern).
     pending_metadata: Vec<(String, String)>,
     pending_message: Option<Bytes>,
+    /// Whether OP_SEND_CLOSE_FROM_CLIENT has been seen.
+    send_closed: bool,
+    /// Active server streaming state (None for unary or not yet started).
+    stream_state: Option<ServerStreamState>,
 }
 
 #[php_impl]
@@ -196,15 +221,19 @@ impl GrpcCall {
             cancel_token: CancellationToken::new(),
             pending_metadata: Vec::new(),
             pending_message: None,
+            send_closed: false,
+            stream_state: None,
         })
     }
 
     /// Starts a batch of operations.
     ///
-    /// The C gRPC extension supports split send/recv patterns where `startBatch`
-    /// is called twice: once with send ops only (metadata + message), then again
-    /// with recv ops only (response + status). We handle this by buffering send
-    /// data and deferring the actual gRPC call until recv ops are present.
+    /// Supports both unary and streaming RPCs by detecting the calling pattern:
+    /// - Unary: recv_message + recv_status in the same batch
+    /// - Server streaming: recv_message without recv_status (multiple startBatch calls)
+    ///
+    /// For streaming, a background tokio task drives the tonic stream and
+    /// communicates with PHP via channels. State persists across startBatch calls.
     #[php(name = "startBatch")]
     pub fn start_batch(&mut self, ops: &ZendHashTable) -> PhpResult<ZBox<ZendObject>> {
         if self.cancel_token.is_cancelled() {
@@ -214,16 +243,18 @@ impl GrpcCall {
             }));
         }
 
-        // Step 1: Parse the ops array on the PHP thread
         let batch = self.parse_ops(ops)?;
 
-        // Send-only batch: buffer the data and return an empty result.
-        // The actual gRPC call will be made when recv ops arrive.
+        // Track SEND_CLOSE_FROM_CLIENT
+        if batch.send_close {
+            self.send_closed = true;
+        }
+
+        // ── CASE 1: Send-only batch — buffer data, return empty result ──
         if batch.has_send_ops && !batch.has_recv_ops {
             self.pending_metadata = batch.send_metadata;
             self.pending_message = batch.send_message;
 
-            // Invoke call credentials plugin now (must run on PHP thread)
             if let Some(ref plugin) = self.call_plugin {
                 let plugin_md = invoke_call_plugin(plugin, &self.method)
                     .map_err(PhpException::from)?;
@@ -233,89 +264,71 @@ impl GrpcCall {
             return Ok(ZendObject::new_stdclass());
         }
 
-        // Determine the metadata and message to send.
-        // If this batch has its own send ops, use those.
-        // Otherwise, use any buffered data from a previous send-only batch.
-        let send_metadata = if batch.has_send_ops {
+        // ── CASE 2: Stream already active — read from it ──
+        if self.stream_state.is_some() {
+            return self.build_stream_result(&batch);
+        }
+
+        // ── CASE 3: No active stream, has recv ops — decide unary vs streaming ──
+
+        // Capture recv flags before moving fields out of batch
+        let recv_initial_metadata = batch.recv_initial_metadata;
+        let recv_message = batch.recv_message;
+        let recv_status = batch.recv_status;
+        let has_send_ops = batch.has_send_ops;
+
+        // Resolve metadata and message (from this batch or buffered)
+        let send_metadata = if has_send_ops {
             batch.send_metadata
         } else {
             std::mem::take(&mut self.pending_metadata)
         };
 
-        let send_message = if batch.has_send_ops {
+        let send_message = if has_send_ops {
             batch.send_message
         } else {
             self.pending_message.take()
         };
 
-        // Invoke call credentials plugin on PHP thread if not already done
         let mut plugin_metadata = Vec::new();
-        if batch.has_send_ops && let Some(ref plugin) = self.call_plugin {
+        if has_send_ops
+            && let Some(ref plugin) = self.call_plugin
+        {
             plugin_metadata = invoke_call_plugin(plugin, &self.method)
                 .map_err(PhpException::from)?;
         }
 
-        // Execute the gRPC call
+        // Unary pattern: recv_message + recv_status in the same batch
+        if recv_message && recv_status {
+            let result = self.execute_call(send_metadata, plugin_metadata, send_message)?;
+            return self.build_unary_result(
+                recv_initial_metadata,
+                recv_message,
+                recv_status,
+                result,
+            );
+        }
+
+        // Server streaming pattern: recv ops without recv_status, send already closed
+        if self.send_closed {
+            self.start_server_stream(send_metadata, plugin_metadata, send_message)?;
+            // build_stream_result still uses BatchOps — create a minimal one for the recv flags
+            let recv_batch = BatchOps {
+                send_metadata: Vec::new(),
+                send_message: None,
+                send_close: false,
+                recv_initial_metadata,
+                recv_message,
+                recv_status,
+                has_send_ops: false,
+                has_recv_ops: true,
+            };
+            return self.build_stream_result(&recv_batch);
+        }
+
+        // Fallback: treat as unary (handles edge cases like recv_status alone)
         let result = self.execute_call(send_metadata, plugin_metadata, send_message)?;
-        let (initial_metadata, body, trailing_metadata, status_code, status_message) = result;
-
-        // Build the result stdClass
-        let mut result_obj = ZendObject::new_stdclass();
-
-        if batch.recv_initial_metadata {
-            if let Some(ref md) = initial_metadata {
-                result_obj
-                    .set_property("metadata", metadata_to_php(md).map_err(PhpException::from)?)
-                    .map_err(|e: ext_php_rs::error::Error| PhpException::default(format!("set metadata: {e}")))?;
-            } else {
-                result_obj
-                    .set_property("metadata", ZendHashTable::new())
-                    .map_err(|e: ext_php_rs::error::Error| PhpException::default(format!("set metadata: {e}")))?;
-            }
-        }
-
-        if batch.recv_message {
-            if let Some(bytes) = body {
-                // Binary<u8> creates a PHP string from raw bytes via set_binary().
-                // Vec::from(Bytes) is zero-copy when Bytes has sole ownership.
-                let bin: ext_php_rs::binary::Binary<u8> = Vec::from(bytes).into();
-                result_obj
-                    .set_property("message", bin)
-                    .map_err(|e: ext_php_rs::error::Error| PhpException::default(format!("set message: {e}")))?;
-            } else {
-                let mut null_zval = Zval::new();
-                null_zval.set_null();
-                result_obj
-                    .set_property("message", null_zval)
-                    .map_err(|e: ext_php_rs::error::Error| PhpException::default(format!("set message: {e}")))?;
-            }
-        }
-
-        if batch.recv_status {
-            let mut status_obj = ZendObject::new_stdclass();
-            status_obj
-                .set_property("code", status_code as i64)
-                .map_err(|e: ext_php_rs::error::Error| PhpException::default(format!("set status code: {e}")))?;
-            status_obj
-                .set_property("details", status_message)
-                .map_err(|e: ext_php_rs::error::Error| PhpException::default(format!("set status details: {e}")))?;
-
-            if let Some(ref md) = trailing_metadata {
-                status_obj
-                    .set_property("metadata", metadata_to_php(md).map_err(PhpException::from)?)
-                    .map_err(|e: ext_php_rs::error::Error| PhpException::default(format!("set status metadata: {e}")))?;
-            } else {
-                status_obj
-                    .set_property("metadata", ZendHashTable::new())
-                    .map_err(|e: ext_php_rs::error::Error| PhpException::default(format!("set status metadata: {e}")))?;
-            }
-
-            result_obj
-                .set_property("status", status_obj)
-                .map_err(|e: ext_php_rs::error::Error| PhpException::default(format!("set status: {e}")))?;
-        }
-
-        Ok(result_obj)
+        self.build_unary_result(recv_initial_metadata, recv_message, recv_status, result)
     }
 
     /// Returns the peer URI.
@@ -431,6 +444,7 @@ impl GrpcCall {
         let mut batch = BatchOps {
             send_metadata: Vec::new(),
             send_message: None,
+            send_close: false,
             recv_initial_metadata: false,
             recv_message: false,
             recv_status: false,
@@ -462,7 +476,7 @@ impl GrpcCall {
                 }
                 OP_SEND_CLOSE_FROM_CLIENT => {
                     batch.has_send_ops = true;
-                    // Acknowledged — close is implicit in unary
+                    batch.send_close = true;
                 }
                 OP_RECV_INITIAL_METADATA => {
                     batch.has_recv_ops = true;
@@ -483,5 +497,384 @@ impl GrpcCall {
         }
 
         Ok(batch)
+    }
+
+    /// Build a PHP result object from a completed unary call.
+    fn build_unary_result(
+        &self,
+        recv_initial_metadata: bool,
+        recv_message: bool,
+        recv_status: bool,
+        result: CallResult,
+    ) -> PhpResult<ZBox<ZendObject>> {
+        let (initial_metadata, body, trailing_metadata, status_code, status_message) = result;
+
+        let mut result_obj = ZendObject::new_stdclass();
+
+        if recv_initial_metadata {
+            if let Some(ref md) = initial_metadata {
+                result_obj
+                    .set_property("metadata", metadata_to_php(md).map_err(PhpException::from)?)
+                    .map_err(|e: ext_php_rs::error::Error| {
+                        PhpException::default(format!("set metadata: {e}"))
+                    })?;
+            } else {
+                result_obj
+                    .set_property("metadata", ZendHashTable::new())
+                    .map_err(|e: ext_php_rs::error::Error| {
+                        PhpException::default(format!("set metadata: {e}"))
+                    })?;
+            }
+        }
+
+        if recv_message {
+            if let Some(bytes) = body {
+                let bin: ext_php_rs::binary::Binary<u8> = Vec::from(bytes).into();
+                result_obj
+                    .set_property("message", bin)
+                    .map_err(|e: ext_php_rs::error::Error| {
+                        PhpException::default(format!("set message: {e}"))
+                    })?;
+            } else {
+                let mut null_zval = Zval::new();
+                null_zval.set_null();
+                result_obj
+                    .set_property("message", null_zval)
+                    .map_err(|e: ext_php_rs::error::Error| {
+                        PhpException::default(format!("set message: {e}"))
+                    })?;
+            }
+        }
+
+        if recv_status {
+            let mut status_obj = ZendObject::new_stdclass();
+            status_obj
+                .set_property("code", status_code as i64)
+                .map_err(|e: ext_php_rs::error::Error| {
+                    PhpException::default(format!("set status code: {e}"))
+                })?;
+            status_obj
+                .set_property("details", status_message)
+                .map_err(|e: ext_php_rs::error::Error| {
+                    PhpException::default(format!("set status details: {e}"))
+                })?;
+
+            if let Some(ref md) = trailing_metadata {
+                status_obj
+                    .set_property("metadata", metadata_to_php(md).map_err(PhpException::from)?)
+                    .map_err(|e: ext_php_rs::error::Error| {
+                        PhpException::default(format!("set status metadata: {e}"))
+                    })?;
+            } else {
+                status_obj
+                    .set_property("metadata", ZendHashTable::new())
+                    .map_err(|e: ext_php_rs::error::Error| {
+                        PhpException::default(format!("set status metadata: {e}"))
+                    })?;
+            }
+
+            result_obj
+                .set_property("status", status_obj)
+                .map_err(|e: ext_php_rs::error::Error| {
+                    PhpException::default(format!("set status: {e}"))
+                })?;
+        }
+
+        Ok(result_obj)
+    }
+
+    /// Build a tonic request with metadata and deadline applied.
+    fn build_request(
+        send_metadata: &[(String, String)],
+        plugin_metadata: &[(String, String)],
+        message: Bytes,
+        deadline_usec: i64,
+    ) -> tonic::Request<Bytes> {
+        let mut request = tonic::Request::new(message);
+
+        let req_metadata = request.metadata_mut();
+        for (key, value) in send_metadata {
+            if let Ok(name) = tonic::metadata::MetadataKey::from_bytes(key.as_bytes())
+                && let Ok(val) = value.parse()
+            {
+                req_metadata.insert(name, val);
+            }
+        }
+        for (key, value) in plugin_metadata {
+            if let Ok(name) = tonic::metadata::MetadataKey::from_bytes(key.as_bytes())
+                && let Ok(val) = value.parse()
+            {
+                req_metadata.insert(name, val);
+            }
+        }
+
+        if deadline_usec < i64::MAX && deadline_usec > 0 {
+            let now_usec = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0i64, |d| d.as_micros() as i64);
+            let timeout_usec = deadline_usec.saturating_sub(now_usec);
+            if timeout_usec > 0 {
+                request.set_timeout(std::time::Duration::from_micros(timeout_usec as u64));
+            }
+        }
+
+        request
+    }
+
+    /// Initiate a server streaming call. Spawns a tokio task that drives
+    /// the stream and sends messages/trailers back via channels.
+    fn start_server_stream(
+        &mut self,
+        send_metadata: Vec<(String, String)>,
+        plugin_metadata: Vec<(String, String)>,
+        send_message: Option<Bytes>,
+    ) -> PhpResult<()> {
+        let rt = get_runtime().map_err(PhpException::from)?;
+
+        let channel = self.channel.clone();
+        let method = self.method.clone();
+        let deadline_usec = self.deadline_usec;
+        let cancel_token = self.cancel_token.clone();
+
+        let path = PathAndQuery::try_from(method.as_str())
+            .map_err(|e| PhpException::from(GrpcError::InvalidArg(format!("invalid method path: {e}"))))?;
+
+        let request = Self::build_request(
+            &send_metadata,
+            &plugin_metadata,
+            send_message.unwrap_or_default(),
+            deadline_usec,
+        );
+
+        // Channels: messages (backpressure buffer=1), initial metadata, trailers
+        let (msg_tx, msg_rx) =
+            tokio::sync::mpsc::channel::<Result<Option<Bytes>, tonic::Status>>(1);
+        let (meta_tx, meta_rx) = tokio::sync::oneshot::channel::<tonic::metadata::MetadataMap>();
+        let (trailers_tx, trailers_rx) = tokio::sync::oneshot::channel::<StreamTrailers>();
+
+        // Spawn the stream-driving task
+        rt.spawn(async move {
+            let mut grpc_client = tonic::client::Grpc::new(channel);
+            if let Err(e) = grpc_client.ready().await {
+                let status = tonic::Status::from_error(Box::new(e));
+                let _ = meta_tx.send(tonic::metadata::MetadataMap::default());
+                let _ = msg_tx.send(Err(status)).await;
+                return;
+            }
+
+            let response = grpc_client
+                .server_streaming(request, path, RawBytesCodec)
+                .await;
+
+            match response {
+                Ok(resp) => {
+                    let initial_md = resp.metadata().clone();
+                    let _ = meta_tx.send(initial_md);
+                    let mut body_stream = resp.into_inner();
+
+                    loop {
+                        tokio::select! {
+                            msg = body_stream.message() => {
+                                match msg {
+                                    Ok(Some(bytes)) => {
+                                        if msg_tx.send(Ok(Some(bytes))).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                    Ok(None) => {
+                                        // End of stream — send sentinel then trailers
+                                        let _ = msg_tx.send(Ok(None)).await;
+                                        let trailers_md = body_stream
+                                            .trailers()
+                                            .await
+                                            .unwrap_or_default()
+                                            .unwrap_or_default();
+                                        let _ = trailers_tx.send(StreamTrailers {
+                                            code: 0,
+                                            message: String::new(),
+                                            metadata: trailers_md,
+                                        });
+                                        return;
+                                    }
+                                    Err(status) => {
+                                        let code = status.code() as i32;
+                                        let message = status.message().to_string();
+                                        let md = status.metadata().clone();
+                                        let _ = msg_tx.send(Ok(None)).await;
+                                        let _ = trailers_tx.send(StreamTrailers {
+                                            code,
+                                            message,
+                                            metadata: md,
+                                        });
+                                        return;
+                                    }
+                                }
+                            }
+                            () = cancel_token.cancelled() => {
+                                let _ = msg_tx.send(Ok(None)).await;
+                                let _ = trailers_tx.send(StreamTrailers {
+                                    code: 1, // CANCELLED
+                                    message: "Call cancelled".into(),
+                                    metadata: tonic::metadata::MetadataMap::default(),
+                                });
+                                return;
+                            }
+                        }
+                    }
+                }
+                Err(status) => {
+                    // Connection-level or early error — no stream opened
+                    let _ = meta_tx.send(tonic::metadata::MetadataMap::default());
+                    let code = status.code() as i32;
+                    let message = status.message().to_string();
+                    let md = status.metadata().clone();
+                    let _ = msg_tx.send(Ok(None)).await;
+                    let _ = trailers_tx.send(StreamTrailers {
+                        code,
+                        message,
+                        metadata: md,
+                    });
+                }
+            }
+        });
+
+        // Synchronously wait for initial metadata (the stream task sends it
+        // as soon as the server responds with headers).
+        let initial_metadata = rt.block_on(meta_rx).ok();
+
+        self.stream_state = Some(ServerStreamState {
+            msg_rx,
+            initial_metadata,
+            cached_trailers: None,
+            trailers_rx: Some(trailers_rx),
+        });
+
+        Ok(())
+    }
+
+    /// Build a PHP result object from the active stream state.
+    fn build_stream_result(&mut self, batch: &BatchOps) -> PhpResult<ZBox<ZendObject>> {
+        let rt = get_runtime().map_err(PhpException::from)?;
+        let state = self
+            .stream_state
+            .as_mut()
+            .ok_or_else(|| PhpException::default("no active stream".into()))?;
+
+        let mut result_obj = ZendObject::new_stdclass();
+
+        // RECV_INITIAL_METADATA — take stored metadata (only available once)
+        if batch.recv_initial_metadata {
+            if let Some(ref md) = state.initial_metadata.take() {
+                result_obj
+                    .set_property("metadata", metadata_to_php(md).map_err(PhpException::from)?)
+                    .map_err(|e: ext_php_rs::error::Error| {
+                        PhpException::default(format!("set metadata: {e}"))
+                    })?;
+            } else {
+                result_obj
+                    .set_property("metadata", ZendHashTable::new())
+                    .map_err(|e: ext_php_rs::error::Error| {
+                        PhpException::default(format!("set metadata: {e}"))
+                    })?;
+            }
+        }
+
+        // RECV_MESSAGE — read next message from the stream
+        if batch.recv_message {
+            if state.cached_trailers.is_some() {
+                // Stream already ended — return null
+                let mut null_zval = Zval::new();
+                null_zval.set_null();
+                result_obj
+                    .set_property("message", null_zval)
+                    .map_err(|e: ext_php_rs::error::Error| {
+                        PhpException::default(format!("set message: {e}"))
+                    })?;
+            } else {
+                let msg = rt.block_on(async { state.msg_rx.recv().await });
+                match msg {
+                    Some(Ok(Some(bytes))) => {
+                        let bin: ext_php_rs::binary::Binary<u8> = Vec::from(bytes).into();
+                        result_obj
+                            .set_property("message", bin)
+                            .map_err(|e: ext_php_rs::error::Error| {
+                                PhpException::default(format!("set message: {e}"))
+                            })?;
+                    }
+                    Some(Ok(None)) | None => {
+                        // End of stream — return null message
+                        let mut null_zval = Zval::new();
+                        null_zval.set_null();
+                        result_obj
+                            .set_property("message", null_zval)
+                            .map_err(|e: ext_php_rs::error::Error| {
+                                PhpException::default(format!("set message: {e}"))
+                            })?;
+                    }
+                    Some(Err(status)) => {
+                        // Mid-stream error — cache as trailers, return null message
+                        state.cached_trailers = Some(StreamTrailers {
+                            code: status.code() as i32,
+                            message: status.message().to_string(),
+                            metadata: status.metadata().clone(),
+                        });
+                        let mut null_zval = Zval::new();
+                        null_zval.set_null();
+                        result_obj
+                            .set_property("message", null_zval)
+                            .map_err(|e: ext_php_rs::error::Error| {
+                                PhpException::default(format!("set message: {e}"))
+                            })?;
+                    }
+                }
+            }
+        }
+
+        // RECV_STATUS_ON_CLIENT — return final status
+        if batch.recv_status {
+            let trailers = if let Some(cached) = state.cached_trailers.take() {
+                cached
+            } else if let Some(rx) = state.trailers_rx.take() {
+                rt.block_on(rx).unwrap_or(StreamTrailers {
+                    code: 2, // UNKNOWN
+                    message: "stream task terminated unexpectedly".into(),
+                    metadata: tonic::metadata::MetadataMap::default(),
+                })
+            } else {
+                StreamTrailers {
+                    code: 2,
+                    message: "stream already consumed".into(),
+                    metadata: tonic::metadata::MetadataMap::default(),
+                }
+            };
+
+            let mut status_obj = ZendObject::new_stdclass();
+            status_obj
+                .set_property("code", trailers.code as i64)
+                .map_err(|e: ext_php_rs::error::Error| {
+                    PhpException::default(format!("set status code: {e}"))
+                })?;
+            status_obj
+                .set_property("details", trailers.message)
+                .map_err(|e: ext_php_rs::error::Error| {
+                    PhpException::default(format!("set status details: {e}"))
+                })?;
+            status_obj
+                .set_property(
+                    "metadata",
+                    metadata_to_php(&trailers.metadata).map_err(PhpException::from)?,
+                )
+                .map_err(|e: ext_php_rs::error::Error| {
+                    PhpException::default(format!("set status metadata: {e}"))
+                })?;
+
+            result_obj
+                .set_property("status", status_obj)
+                .map_err(|e: ext_php_rs::error::Error| {
+                    PhpException::default(format!("set status: {e}"))
+                })?;
+        }
+
+        Ok(result_obj)
     }
 }

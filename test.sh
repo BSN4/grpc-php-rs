@@ -29,6 +29,7 @@ Commands:
   grpc-gcp    Run google/grpc-gcp channel pool compatibility test
   firestore   Run Firestore client compatibility test
   leak        Run memory leak test with local gRPC test server
+  streaming   Run server streaming test with local gRPC test server
   zts         Run ZTS stress test with FrankenPHP + concurrent requests
   temporal    Run Temporal SDK integration test (starts temporalio/auto-setup)
   otel        Run OpenTelemetry integration test (starts otel-collector)
@@ -92,6 +93,13 @@ cmd_leak() {
     info "Running memory leak tests"
     run_target test-leak
     ok "Memory leak test passed"
+}
+
+cmd_streaming() {
+    build_target test-streaming
+    info "Running server streaming test"
+    run_target test-streaming
+    ok "Server streaming test passed"
 }
 
 cmd_zts() {
@@ -212,6 +220,7 @@ case "$command" in
     grpc-gcp)    cmd_grpc_gcp ;;
     firestore)   cmd_firestore ;;
     leak)        cmd_leak ;;
+    streaming)   cmd_streaming ;;
     zts)         cmd_zts ;;
     temporal)    cmd_temporal ;;
     otel)        cmd_otel ;;

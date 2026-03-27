@@ -128,6 +128,15 @@ COPY tests/leak_test.php /app/tests/leak_test.php
 CMD ["sh", "-c", "grpc-test-server & sleep 1 && php tests/leak_test.php"]
 
 # ---------------------------------------------------------------------------
+# Stage 9b: Server streaming test runner
+FROM test-base AS test-streaming
+
+COPY --from=test-server-builder /build/target/release/grpc-test-server /usr/local/bin/grpc-test-server
+COPY tests/test_streaming.php /app/tests/test_streaming.php
+
+CMD ["sh", "-c", "grpc-test-server & sleep 1 && php tests/test_streaming.php"]
+
+# ---------------------------------------------------------------------------
 # Stage 10: Integration test base — Temporal SDK
 FROM test-base AS test-integration-base
 
