@@ -414,10 +414,9 @@ impl GrpcCall {
                     match response {
                         Ok(resp) => {
                             let (resp_metadata, body, _extensions) = resp.into_parts();
-                            // Return None for empty bodies (e.g. google.protobuf.Empty)
-                            // so PHP receives null for the message — matching C ext behavior.
-                            let body = if body.is_empty() { None } else { Some(body) };
-                            Ok((Some(resp_metadata), body, None, 0i32, String::new()))
+                            // Return the body even when empty — the C-based grpc extension
+                            // returns "" for 0-byte messages, and PHP libraries depend on that.
+                            Ok((Some(resp_metadata), Some(body), None, 0i32, String::new()))
                         }
                         Err(status) => {
                             let code = status.code() as i32;
