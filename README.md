@@ -78,6 +78,7 @@ echo "extension=grpc" > $(php -r "echo PHP_CONFIG_FILE_SCAN_DIR;")/grpc.ini
 | 8.2, 8.3, 8.4, 8.5 | Linux | x86_64 | NTS, ZTS |
 | 8.2, 8.3, 8.4, 8.5 | Linux | ARM64 | NTS, ZTS |
 | 8.2, 8.3, 8.4, 8.5 | macOS | ARM64 | NTS |
+| 8.2, 8.3, 8.4, 8.5 | Windows | x86_64 | NTS |
 
 ## Usage
 
@@ -100,12 +101,12 @@ All existing gRPC PHP code works unchanged — `Grpc\Channel`, `Grpc\ChannelCred
 ## Building from Source
 
 Requirements:
-- Rust toolchain (stable)
+- Rust toolchain (stable; nightly required on Windows)
 - PHP 8.2+ development headers (`php-dev` / `php-devel`)
 
 ```sh
 cargo build --release
-# Output: target/release/libgrpc_php_rs.so (Linux) or libgrpc_php_rs.dylib (macOS)
+# Output: target/release/libgrpc_php_rs.so (Linux) or libgrpc_php_rs.dylib (macOS) or grpc_php_rs.dll (Windows)
 ```
 
 ## Running Tests
