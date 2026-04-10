@@ -42,22 +42,7 @@ Available tags: `latest-php8.2`, `latest-php8.3`, `latest-php8.4`, `latest-php8.
 pie install bsn4/grpc
 ```
 
-> **Note:** Requires PIE 1.4.0+ (pre-packaged binary support). PIE 1.3.x will fail.
-
-In Docker (when PIE 1.4.0 stable isn't available yet):
-
-```dockerfile
-RUN apt-get update && apt-get install -y --no-install-recommends curl unzip git \
-    && git clone --branch 1.4.x --depth 1 https://github.com/php/pie.git /tmp/pie \
-    && curl -sLo /usr/local/bin/composer https://getcomposer.org/download/latest-stable/composer.phar \
-    && chmod +x /usr/local/bin/composer \
-    && cd /tmp/pie && composer install --no-dev --quiet \
-    && /tmp/pie/bin/pie install bsn4/grpc \
-    && rm -rf /tmp/pie /usr/local/bin/composer \
-    && apt-get purge -y git unzip \
-    && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
-```
+Requires [PIE 1.4.0+](https://github.com/php/pie/releases/tag/1.4.0) for pre-packaged binary support.
 
 ### Manual download
 
