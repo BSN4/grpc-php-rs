@@ -34,7 +34,7 @@ jobs:
         php: ['8.2', '8.3', '8.4', '8.5']
         arch: ['x86_64', 'arm64']
         ts: ['nts', 'zts']
-        libc: ['glibc']
+        libc: ['glibc', 'musl']
     steps:
       - uses: actions/checkout@v6
 
@@ -42,13 +42,22 @@ jobs:
         id: docker
         run: |
           PHP_MINOR="${{ matrix.php }}"
-          if [[ "${{ matrix.ts }}" == "zts" ]]; then
-            echo "image=php:${PHP_MINOR}-zts" >> "$GITHUB_OUTPUT"
+          if [[ "${{ matrix.libc }}" == "musl" ]]; then
+            if [[ "${{ matrix.ts }}" == "zts" ]]; then
+              echo "image=php:${PHP_MINOR}-zts-alpine" >> "$GITHUB_OUTPUT"
+            else
+              echo "image=php:${PHP_MINOR}-alpine" >> "$GITHUB_OUTPUT"
+            fi
           else
-            echo "image=php:${PHP_MINOR}-cli" >> "$GITHUB_OUTPUT"
+            if [[ "${{ matrix.ts }}" == "zts" ]]; then
+              echo "image=php:${PHP_MINOR}-zts" >> "$GITHUB_OUTPUT"
+            else
+              echo "image=php:${PHP_MINOR}-cli" >> "$GITHUB_OUTPUT"
+            fi
           fi
 
-      - name: Build in Docker
+      - name: Build in Docker (glibc)
+        if: matrix.libc == 'glibc'
         run: |
           docker run --rm \
             -v "${{ github.workspace }}:/src" \
@@ -56,18 +65,27 @@ jobs:
             ${{ steps.docker.outputs.image }} \
             sh -c '
               set -e
-
-              # Install build dependencies (PHP headers already at /usr/local/include/php/)
               apt-get update && apt-get install -y curl gcc make libclang-dev
-
-              # Install Rust
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
               . "$HOME/.cargo/env"
-
-              # Build
               cargo build --release
+              cp target/release/libgrpc_php_rs.so /src/grpc.so
+            '
 
-              # Rename to grpc.so
+      - name: Build in Docker (musl)
+        if: matrix.libc == 'musl'
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/src" \
+            -w /src \
+            ${{ steps.docker.outputs.image }} \
+            sh -c '
+              set -e
+              apk add --no-cache curl gcc g++ make pkgconfig protobuf protobuf-dev clang-dev musl-dev linux-headers
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+              . "$HOME/.cargo/env"
+              # musl Rust target defaults to static-only; enable dynamic linking for cdylib
+              RUSTFLAGS="-C target-feature=-crt-static" cargo build --release
               cp target/release/libgrpc_php_rs.so /src/grpc.so
             '
 

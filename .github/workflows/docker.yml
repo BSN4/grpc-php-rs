@@ -25,6 +25,7 @@ jobs:
       matrix:
         php: ['8.2', '8.3', '8.4', '8.5']
         ts: ['nts', 'zts']
+        libc: ['glibc', 'musl']
     steps:
       - uses: actions/checkout@v4
 
@@ -47,25 +48,44 @@ jobs:
           VERSION="${{ github.event.inputs.tag || github.ref_name }}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-          if [[ "${{ matrix.ts }}" == "zts" ]]; then
-            echo "php_image=php:${{ matrix.php }}-zts" >> "$GITHUB_OUTPUT"
-            echo "ts_suffix=-zts" >> "$GITHUB_OUTPUT"
+          if [[ "${{ matrix.libc }}" == "musl" ]]; then
+            ALPINE_SUFFIX="-alpine"
+            DOCKERFILE="docker/Dockerfile.alpine"
+            if [[ "${{ matrix.ts }}" == "zts" ]]; then
+              echo "php_image=php:${{ matrix.php }}-zts-alpine" >> "$GITHUB_OUTPUT"
+            else
+              echo "php_image=php:${{ matrix.php }}-alpine" >> "$GITHUB_OUTPUT"
+            fi
           else
-            echo "php_image=php:${{ matrix.php }}-cli" >> "$GITHUB_OUTPUT"
-            echo "ts_suffix=" >> "$GITHUB_OUTPUT"
+            ALPINE_SUFFIX=""
+            DOCKERFILE="docker/Dockerfile"
+            if [[ "${{ matrix.ts }}" == "zts" ]]; then
+              echo "php_image=php:${{ matrix.php }}-zts" >> "$GITHUB_OUTPUT"
+            else
+              echo "php_image=php:${{ matrix.php }}-cli" >> "$GITHUB_OUTPUT"
+            fi
           fi
+
+          if [[ "${{ matrix.ts }}" == "zts" ]]; then
+            TS_SUFFIX="-zts"
+          else
+            TS_SUFFIX=""
+          fi
+
+          echo "dockerfile=${DOCKERFILE}" >> "$GITHUB_OUTPUT"
+          echo "tag_suffix=${ALPINE_SUFFIX}${TS_SUFFIX}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: docker/Dockerfile
+          file: ${{ steps.meta.outputs.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
             PHP_IMAGE=${{ steps.meta.outputs.php_image }}
           tags: |
-            ${{ env.IMAGE }}:${{ steps.meta.outputs.version }}-php${{ matrix.php }}${{ steps.meta.outputs.ts_suffix }}
-            ${{ env.IMAGE }}:latest-php${{ matrix.php }}${{ steps.meta.outputs.ts_suffix }}
-          cache-from: type=gha,scope=php${{ matrix.php }}-${{ matrix.ts }}
-          cache-to: type=gha,mode=max,scope=php${{ matrix.php }}-${{ matrix.ts }}
+            ${{ env.IMAGE }}:${{ steps.meta.outputs.version }}-php${{ matrix.php }}${{ steps.meta.outputs.tag_suffix }}
+            ${{ env.IMAGE }}:latest-php${{ matrix.php }}${{ steps.meta.outputs.tag_suffix }}
+          cache-from: type=gha,scope=php${{ matrix.php }}-${{ matrix.ts }}-${{ matrix.libc }}
+          cache-to: type=gha,mode=max,scope=php${{ matrix.php }}-${{ matrix.ts }}-${{ matrix.libc }}

@@ -1,0 +1,40 @@
+# Pre-built grpc-php-rs extension image (Alpine / musl).
+#
+# Usage in your Dockerfile:
+#   COPY --from=ghcr.io/bsn4/grpc-php-rs:latest-php8.5-alpine /usr/local/ /usr/local/
+#
+# Build args:
+#   PHP_IMAGE  - base PHP Alpine image (e.g. php:8.5-alpine, php:8.5-zts-alpine)
+
+ARG PHP_IMAGE=php:8.5-alpine
+
+FROM ${PHP_IMAGE} AS builder
+
+RUN apk add --no-cache \
+        curl gcc g++ make pkgconfig protobuf protobuf-dev clang-dev musl-dev linux-headers
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY .cargo/ .cargo/
+COPY clippy.toml ./
+COPY src/ src/
+
+# musl Rust target defaults to static-only; enable dynamic linking for cdylib
+RUN RUSTFLAGS="-C target-feature=-crt-static" cargo build --release
+
+# Detect the extension directory for this PHP build and stage the files.
+# Also bundle libgcc_s.so.1 (runtime dependency of the .so) into a system lib path
+# so users don't need to `apk add libgcc` separately.
+RUN EXT_DIR="$(php -i | grep '^extension_dir' | head -1 | sed 's/.*=> //' | awk '{print $1}')" \
+    && mkdir -p "/output${EXT_DIR}" \
+    && cp target/release/libgrpc_php_rs.so "/output${EXT_DIR}/grpc.so" \
+    && mkdir -p /output/usr/local/etc/php/conf.d \
+    && echo "extension=grpc.so" > /output/usr/local/etc/php/conf.d/grpc.ini \
+    && mkdir -p /output/usr/local/lib \
+    && cp -L /usr/lib/libgcc_s.so.1 /output/usr/local/lib/libgcc_s.so.1
+
+FROM scratch
+COPY --from=builder /output/ /

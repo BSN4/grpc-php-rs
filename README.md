@@ -34,7 +34,14 @@ For ZTS (FrankenPHP, Swoole, etc.):
 COPY --from=ghcr.io/bsn4/grpc-php-rs:latest-php8.5-zts /usr/local/ /usr/local/
 ```
 
-Available tags: `latest-php8.2`, `latest-php8.3`, `latest-php8.4`, `latest-php8.5` (add `-zts` for thread-safe). Version-pinned tags like `v0.1.2-php8.5` are also available.
+For Alpine:
+
+```dockerfile
+FROM php:8.5-alpine
+COPY --from=ghcr.io/bsn4/grpc-php-rs:latest-php8.5-alpine /usr/local/ /usr/local/
+```
+
+Available tags: `latest-php{8.2,8.3,8.4,8.5}` for Debian, append `-alpine` for Alpine, append `-zts` for thread-safe (e.g. `latest-php8.5-alpine-zts`). Version-pinned tags like `v0.2.1-php8.5-alpine` are also available.
 
 ### Via PIE
 
@@ -56,12 +63,16 @@ cp grpc.so $(php -r "echo ini_get('extension_dir');")
 echo "extension=grpc" > $(php -r "echo PHP_CONFIG_FILE_SCAN_DIR;")/grpc.ini
 ```
 
+> **Alpine note:** When using the `linux-musl` binary outside of the Docker install image, you also need `apk add --no-cache libgcc`. The Docker install image bundles this for you.
+
 ## Supported Platforms
 
 | PHP | OS | Arch | Thread Safety |
 |-----|-------|--------|---------------|
-| 8.2, 8.3, 8.4, 8.5 | Linux | x86_64 | NTS, ZTS |
-| 8.2, 8.3, 8.4, 8.5 | Linux | ARM64 | NTS, ZTS |
+| 8.2, 8.3, 8.4, 8.5 | Linux (glibc) | x86_64 | NTS, ZTS |
+| 8.2, 8.3, 8.4, 8.5 | Linux (glibc) | ARM64 | NTS, ZTS |
+| 8.2, 8.3, 8.4, 8.5 | Linux (musl/Alpine) | x86_64 | NTS, ZTS |
+| 8.2, 8.3, 8.4, 8.5 | Linux (musl/Alpine) | ARM64 | NTS, ZTS |
 | 8.2, 8.3, 8.4, 8.5 | macOS | ARM64 | NTS |
 | 8.2, 8.3, 8.4, 8.5 | Windows | x86_64 | NTS |
 
