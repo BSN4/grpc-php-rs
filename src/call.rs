@@ -188,6 +188,8 @@ pub struct GrpcCall {
     host_override: Option<String>,
     call_plugin: Option<Arc<Mutex<Option<Zval>>>>,
     cancel_token: CancellationToken,
+    max_decoding_message_size: Option<usize>,
+    max_encoding_message_size: Option<usize>,
     /// Buffered send data from a send-only startBatch (split send/recv pattern).
     pending_metadata: Vec<(String, String)>,
     pending_message: Option<Bytes>,
@@ -213,6 +215,8 @@ impl GrpcCall {
         let target = channel.get_target_uri().unwrap_or_default();
 
         let call_plugin = channel.get_call_plugin();
+        let max_decoding_message_size = channel.get_max_decoding_message_size();
+        let max_encoding_message_size = channel.get_max_encoding_message_size();
 
         Ok(Self {
             channel: tonic_channel,
@@ -221,6 +225,8 @@ impl GrpcCall {
             deadline_usec: deadline.get_usec(),
             host_override,
             call_plugin,
+            max_decoding_message_size,
+            max_encoding_message_size,
             cancel_token: CancellationToken::new(),
             pending_metadata: Vec::new(),
             pending_message: None,
@@ -404,6 +410,8 @@ impl GrpcCall {
         let method = self.method.clone();
         let deadline_usec = self.deadline_usec;
         let cancel_token = self.cancel_token.clone();
+        let max_decoding = self.max_decoding_message_size;
+        let max_encoding = self.max_encoding_message_size;
 
         let result: Result<CallResult, GrpcError> = rt.block_on(async move {
             // Build the path
@@ -444,6 +452,12 @@ impl GrpcCall {
 
             // Make the unary call using the raw codec, with cancellation support
             let mut grpc_client = tonic::client::Grpc::new(channel);
+            if let Some(limit) = max_decoding {
+                grpc_client = grpc_client.max_decoding_message_size(limit);
+            }
+            if let Some(limit) = max_encoding {
+                grpc_client = grpc_client.max_encoding_message_size(limit);
+            }
             grpc_client.ready().await.map_err(GrpcError::Transport)?;
 
             let call_future = grpc_client.unary(request, path, RawBytesCodec);
@@ -673,6 +687,8 @@ impl GrpcCall {
         let method = self.method.clone();
         let deadline_usec = self.deadline_usec;
         let cancel_token = self.cancel_token.clone();
+        let max_decoding = self.max_decoding_message_size;
+        let max_encoding = self.max_encoding_message_size;
 
         let path = PathAndQuery::try_from(method.as_str()).map_err(|e| {
             PhpException::from(GrpcError::InvalidArg(format!("invalid method path: {e}")))
@@ -694,6 +710,12 @@ impl GrpcCall {
         // Spawn the stream-driving task
         rt.spawn(async move {
             let mut grpc_client = tonic::client::Grpc::new(channel);
+            if let Some(limit) = max_decoding {
+                grpc_client = grpc_client.max_decoding_message_size(limit);
+            }
+            if let Some(limit) = max_encoding {
+                grpc_client = grpc_client.max_encoding_message_size(limit);
+            }
             if let Err(e) = grpc_client.ready().await {
                 let status = tonic::Status::from_error(Box::new(e));
                 let _ = meta_tx.send(tonic::metadata::MetadataMap::default());
@@ -806,6 +828,8 @@ impl GrpcCall {
         let method = self.method.clone();
         let deadline_usec = self.deadline_usec;
         let cancel_token = self.cancel_token.clone();
+        let max_decoding = self.max_decoding_message_size;
+        let max_encoding = self.max_encoding_message_size;
 
         let path = PathAndQuery::try_from(method.as_str()).map_err(|e| {
             PhpException::from(GrpcError::InvalidArg(format!("invalid method path: {e}")))
@@ -849,6 +873,12 @@ impl GrpcCall {
 
         rt.spawn(async move {
             let mut grpc_client = tonic::client::Grpc::new(channel);
+            if let Some(limit) = max_decoding {
+                grpc_client = grpc_client.max_decoding_message_size(limit);
+            }
+            if let Some(limit) = max_encoding {
+                grpc_client = grpc_client.max_encoding_message_size(limit);
+            }
             if let Err(e) = grpc_client.ready().await {
                 let status = tonic::Status::from_error(Box::new(e));
                 let _ = meta_tx.send(tonic::metadata::MetadataMap::default());
