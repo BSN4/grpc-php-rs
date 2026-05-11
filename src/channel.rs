@@ -18,6 +18,8 @@ struct ChannelInner {
     target: String,
     state: Mutex<i64>,
     call_plugin: Option<Arc<Mutex<Option<Zval>>>>,
+    max_decoding_message_size: Option<usize>,
+    max_encoding_message_size: Option<usize>,
 }
 
 #[php_class]
@@ -104,6 +106,19 @@ impl GrpcChannel {
                 .map_err(|e| PhpException::from(GrpcError::InvalidArg(e.to_string())))?;
         }
 
+        // Extract gRPC message size limits (maps to tonic's max_decoding/encoding_message_size).
+        // The C extension uses grpc.max_receive_message_length / grpc.max_send_message_length;
+        // tonic defaults to 4 MiB decoding / unlimited encoding. A value of -1 means unlimited.
+        let max_decoding_message_size = args
+            .get("grpc.max_receive_message_length")
+            .and_then(|v| v.long())
+            .and_then(|v| if v == -1 { Some(usize::MAX) } else if v > 0 { Some(v as usize) } else { None });
+
+        let max_encoding_message_size = args
+            .get("grpc.max_send_message_length")
+            .and_then(|v| v.long())
+            .and_then(|v| if v == -1 { Some(usize::MAX) } else if v > 0 { Some(v as usize) } else { None });
+
         // Apply TLS config.
         // Always call tls_config() when credentials were provided — tonic requires
         // explicit TLS config even for https:// URLs (it doesn't auto-enable).
@@ -129,6 +144,8 @@ impl GrpcChannel {
                 target,
                 state: Mutex::new(CHANNEL_IDLE),
                 call_plugin,
+                max_decoding_message_size,
+                max_encoding_message_size,
             })),
         })
     }
@@ -197,5 +214,15 @@ impl GrpcChannel {
         self.inner
             .as_ref()
             .and_then(|i| i.call_plugin.as_ref().map(Arc::clone))
+    }
+
+    /// Returns the configured max decoding (receive) message size, if any.
+    pub(crate) fn get_max_decoding_message_size(&self) -> Option<usize> {
+        self.inner.as_ref().and_then(|i| i.max_decoding_message_size)
+    }
+
+    /// Returns the configured max encoding (send) message size, if any.
+    pub(crate) fn get_max_encoding_message_size(&self) -> Option<usize> {
+        self.inner.as_ref().and_then(|i| i.max_encoding_message_size)
     }
 }
