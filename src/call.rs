@@ -133,38 +133,99 @@ fn parse_metadata(ht: &ZendHashTable) -> Vec<(String, String)> {
     metadata
 }
 
-/// Build a metadata array for PHP from a tonic MetadataMap.
-fn metadata_to_php(map: &tonic::metadata::MetadataMap) -> Result<ZBox<ZendHashTable>, GrpcError> {
-    let mut ht = ZendHashTable::new();
+/// A single metadata entry as raw bytes, grouped per key in iteration order.
+///
+/// ASCII values are surfaced as their underlying byte slice (HTTP/2 wire form,
+/// which is also the human-readable form for ASCII keys). Binary (`-bin`) values
+/// are surfaced as the decoded raw bytes, matching `ext-grpc`'s observable
+/// behavior, where PHP user code receives the unmodified payload as a (binary
+/// safe) PHP string.
+type MetadataEntries = Vec<(String, Vec<Vec<u8>>)>;
+
+/// Collect a tonic `MetadataMap` into a flat list of `(key, values)` pairs.
+///
+/// Pure function with no PHP dependencies; unit-tested below. The PHP-binding
+/// layer (`metadata_to_php`) is a thin wrapper that converts the result into a
+/// `ZendHashTable`.
+///
+/// Behaviors:
+///  - Iteration order of the original `MetadataMap` is preserved.
+///  - Repeated keys are collapsed into a `Vec<Vec<u8>>`, matching the historic
+///    "each key maps to an array of values" PHP shape.
+///  - For `KeyAndValueRef::Binary`, the value is decoded via `to_bytes()`
+///    (tonic's API for the decoded payload; `as_encoded_bytes()` would return
+///    the base64 wire form, which we do NOT want). If a malformed binary value
+///    fails to decode, that single entry is skipped rather than failing the
+///    whole call: matches the ASCII branch's prior tolerance of `to_str()`
+///    failures.
+fn collect_metadata(map: &tonic::metadata::MetadataMap) -> MetadataEntries {
+    let mut entries: MetadataEntries = Vec::new();
     for key_and_value in map.iter() {
-        if let tonic::metadata::KeyAndValueRef::Ascii(key, value) = key_and_value {
-            let key_str = key.as_str();
-            if let Ok(val_str) = value.to_str() {
-                // Each metadata key maps to an array of values
-                let existing = ht.get(key_str);
-                if let Some(existing_zval) = existing {
-                    if let Some(arr) = existing_zval.array() {
-                        let mut new_arr = ZendHashTable::new();
-                        for (_k, v) in arr.iter() {
-                            new_arr.push(v.shallow_clone()).map_err(|e| {
-                                GrpcError::InvalidArg(format!("metadata build: {e}"))
-                            })?;
-                        }
-                        new_arr
-                            .push(val_str.to_string())
-                            .map_err(|e| GrpcError::InvalidArg(format!("metadata build: {e}")))?;
-                        ht.insert(key_str, new_arr)
-                            .map_err(|e| GrpcError::InvalidArg(format!("metadata build: {e}")))?;
-                    }
-                } else {
-                    let mut arr = ZendHashTable::new();
-                    arr.push(val_str.to_string())
-                        .map_err(|e| GrpcError::InvalidArg(format!("metadata build: {e}")))?;
-                    ht.insert(key_str, arr)
-                        .map_err(|e| GrpcError::InvalidArg(format!("metadata build: {e}")))?;
+        let (key_str, bytes): (&str, Vec<u8>) = match key_and_value {
+            tonic::metadata::KeyAndValueRef::Ascii(key, value) => {
+                // Preserve the prior behavior of dropping ASCII values that
+                // fail `to_str()` (non-visible-ASCII). In practice tonic only
+                // admits visible-ASCII bytes into `MetadataValue<Ascii>`, so
+                // this branch effectively always succeeds; keeping `to_str()`
+                // here makes the patch purely additive with respect to the
+                // ASCII path.
+                match value.to_str() {
+                    Ok(s) => (key.as_str(), s.as_bytes().to_vec()),
+                    Err(_) => continue,
                 }
             }
+            tonic::metadata::KeyAndValueRef::Binary(key, value) => {
+                // Binary trailers (e.g. `grpc-status-details-bin`) carry
+                // base64-encoded payloads on the wire. `to_bytes()` returns the
+                // decoded bytes, exactly what ext-grpc surfaces to PHP.
+                // `as_encoded_bytes()` would return the base64 wire form, which
+                // we do NOT want.
+                match value.to_bytes() {
+                    Ok(decoded) => (key.as_str(), decoded.to_vec()),
+                    // Drop malformed binary values rather than failing the
+                    // whole map; mirrors the ASCII branch's tolerance pattern.
+                    Err(_) => continue,
+                }
+            }
+        };
+
+        // Group by key, preserving the order in which keys are first seen.
+        if let Some(slot) = entries.iter_mut().find(|(k, _)| k == key_str) {
+            slot.1.push(bytes);
+        } else {
+            entries.push((key_str.to_owned(), vec![bytes]));
         }
+    }
+    entries
+}
+
+/// Convert a slice of raw bytes into a PHP string (binary-safe) wrapped in a
+/// `Zval`. PHP strings are length-prefixed and may contain arbitrary bytes
+/// including null bytes; same shape `ext-grpc` produces for binary trailers.
+fn bytes_to_php_string_zval(bytes: &[u8]) -> Zval {
+    let mut zv = Zval::new();
+    // `ZendStr::new` takes `impl AsRef<[u8]>` and copies the bytes into a
+    // Zend-allocated string; no UTF-8 validation involved.
+    zv.set_zend_string(ext_php_rs::types::ZendStr::new(bytes, false));
+    zv
+}
+
+/// Build a metadata array for PHP from a tonic MetadataMap.
+///
+/// Output shape: `array<string, array<int, string>>`; each metadata key maps
+/// to an ordered list of values. ASCII values are surfaced as their raw bytes
+/// (typically printable ASCII). Binary (`-bin`) values are surfaced as the
+/// decoded raw payload in a PHP binary-safe string, matching `ext-grpc`.
+fn metadata_to_php(map: &tonic::metadata::MetadataMap) -> Result<ZBox<ZendHashTable>, GrpcError> {
+    let mut ht = ZendHashTable::new();
+    for (key, values) in collect_metadata(map) {
+        let mut arr = ZendHashTable::new();
+        for v in &values {
+            arr.push(bytes_to_php_string_zval(v))
+                .map_err(|e| GrpcError::InvalidArg(format!("metadata build: {e}")))?;
+        }
+        ht.insert(key.as_str(), arr)
+            .map_err(|e| GrpcError::InvalidArg(format!("metadata build: {e}")))?;
     }
     Ok(ht)
 }
@@ -1125,5 +1186,109 @@ impl GrpcCall {
         }
 
         Ok(result_obj)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_metadata;
+    use tonic::metadata::{AsciiMetadataValue, BinaryMetadataValue, MetadataKey, MetadataMap};
+
+    /// ASCII metadata is surfaced as raw bytes (the on-wire form), grouped by
+    /// key with insertion order preserved per key.
+    #[test]
+    fn ascii_metadata_is_collected() {
+        let mut map = MetadataMap::new();
+        map.insert("foo", AsciiMetadataValue::from_static("bar"));
+        map.append("foo", AsciiMetadataValue::from_static("baz"));
+        map.insert("other", AsciiMetadataValue::from_static("qux"));
+
+        let collected = collect_metadata(&map);
+
+        let foo = collected.iter().find(|(k, _)| k == "foo");
+        assert!(foo.is_some(), "foo key present");
+        if let Some((_, values)) = foo {
+            assert_eq!(values, &vec![b"bar".to_vec(), b"baz".to_vec()]);
+        }
+
+        let other = collected.iter().find(|(k, _)| k == "other");
+        assert!(other.is_some(), "other key present");
+        if let Some((_, values)) = other {
+            assert_eq!(values, &vec![b"qux".to_vec()]);
+        }
+    }
+
+    /// Binary (`-bin`) metadata is surfaced as the *decoded* raw payload,
+    /// matching ext-grpc. This is the case the previous implementation silently
+    /// dropped, breaking `grpc-status-details-bin` and other rich-status
+    /// propagation.
+    #[test]
+    fn binary_metadata_is_surfaced_as_decoded_bytes() {
+        // Arbitrary binary payload, includes a null byte and a non-UTF-8
+        // sequence to demonstrate that PHP-side surfacing must be byte-safe and
+        // must NOT be base64-encoded.
+        let payload: &[u8] = b"\x00\x01\x02\xff\xfehello\x00world";
+
+        let mut map = MetadataMap::new();
+        let key: Result<MetadataKey<tonic::metadata::Binary>, _> = "x-custom-bin".parse();
+        assert!(key.is_ok(), "binary metadata key must parse");
+        if let Ok(k) = key {
+            map.insert_bin(k, BinaryMetadataValue::from_bytes(payload));
+        }
+
+        let collected = collect_metadata(&map);
+
+        let entry = collected.iter().find(|(k, _)| k == "x-custom-bin");
+        assert!(entry.is_some(), "binary key present in collected output");
+        if let Some((_, values)) = entry {
+            assert_eq!(values.len(), 1, "single value expected");
+            if let Some(first) = values.first() {
+                assert_eq!(
+                    first.as_slice(),
+                    payload,
+                    "binary value must be the decoded raw bytes, not the base64 wire form"
+                );
+            }
+        }
+    }
+
+    /// Mixed map: both ASCII and binary entries must coexist.
+    #[test]
+    fn mixed_ascii_and_binary_are_both_present() {
+        let mut map = MetadataMap::new();
+        map.insert(
+            "content-type",
+            AsciiMetadataValue::from_static("application/grpc"),
+        );
+        let key: Result<MetadataKey<tonic::metadata::Binary>, _> =
+            "grpc-status-details-bin".parse();
+        assert!(key.is_ok());
+        // 4-byte marker that resembles a small protobuf payload.
+        let payload: &[u8] = b"\x08\x05\x12\x00";
+        if let Ok(k) = key {
+            map.insert_bin(k, BinaryMetadataValue::from_bytes(payload));
+        }
+
+        let collected = collect_metadata(&map);
+
+        assert_eq!(collected.len(), 2);
+        assert!(
+            collected
+                .iter()
+                .any(|(k, v)| k == "content-type" && v == &vec![b"application/grpc".to_vec()])
+        );
+        assert!(
+            collected
+                .iter()
+                .any(|(k, v)| k == "grpc-status-details-bin" && v == &vec![payload.to_vec()])
+        );
+    }
+
+    /// Sanity check: an empty `MetadataMap` produces no entries.
+    #[test]
+    fn empty_metadata_produces_empty_entries() {
+        let map = MetadataMap::new();
+        let collected = collect_metadata(&map);
+        assert!(collected.is_empty());
     }
 }
