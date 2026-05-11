@@ -18,7 +18,15 @@ impl TestService for TestServiceImpl {
     type BidiEchoStream = ReceiverStream<Result<Payload, Status>>;
 
     async fn echo(&self, request: Request<Payload>) -> Result<Response<Payload>, Status> {
-        Ok(Response::new(request.into_inner()))
+        let mut response = Response::new(request.into_inner());
+        // Attach a binary trailer so PHP clients can verify their extension
+        // surfaces `-bin` metadata. Payload contains a NUL and non-UTF-8 byte
+        // to make sure raw bytes survive intact (no string conversion).
+        response.metadata_mut().insert_bin(
+            "x-test-binary-bin",
+            tonic::metadata::MetadataValue::from_bytes(b"hello\x00\xfftrailer"),
+        );
+        Ok(response)
     }
 
     async fn empty_response(&self, _request: Request<Payload>) -> Result<Response<Empty>, Status> {
@@ -39,7 +47,20 @@ impl TestService for TestServiceImpl {
         &self,
         _request: Request<Payload>,
     ) -> Result<Response<Payload>, Status> {
-        Err(Status::internal("test error"))
+        // Attach a binary trailer via Status metadata. This is the path real
+        // services use for rich-status / google.rpc.Status propagation in
+        // `grpc-status-details-bin`. Surfaces to PHP through the trailing
+        // metadata in OP_RECV_STATUS_ON_CLIENT.
+        let mut md = tonic::metadata::MetadataMap::new();
+        md.insert_bin(
+            "x-test-binary-bin",
+            tonic::metadata::MetadataValue::from_bytes(b"hello\x00\xfftrailer"),
+        );
+        Err(Status::with_metadata(
+            tonic::Code::Internal,
+            "test error",
+            md,
+        ))
     }
 
     async fn stream_echo(
