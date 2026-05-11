@@ -139,6 +139,15 @@ COPY tests/test_empty_response.php /app/tests/test_empty_response.php
 CMD ["sh", "-c", "grpc-test-server & sleep 1 && php tests/test_streaming.php && php tests/test_empty_response.php"]
 
 # ---------------------------------------------------------------------------
+# Stage 9c: Binary trailing metadata test runner
+FROM test-base AS test-binary-trailer
+
+COPY --from=test-server-builder /build/target/release/grpc-test-server /usr/local/bin/grpc-test-server
+COPY tests/test_binary_trailer.php /app/tests/test_binary_trailer.php
+
+CMD ["sh", "-c", "grpc-test-server & sleep 1 && php tests/test_binary_trailer.php"]
+
+# ---------------------------------------------------------------------------
 # Stage 10: Integration test base — Temporal SDK
 FROM test-base AS test-integration-base
 
