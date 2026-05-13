@@ -31,6 +31,7 @@ Commands:
   leak        Run memory leak test with local gRPC test server
   streaming   Run server streaming test with local gRPC test server
   zts         Run ZTS stress test with FrankenPHP + concurrent requests
+  zts-highthread  Run ZTS stress test with 400 threads (pthread_key exhaustion regression test)
   temporal    Run Temporal SDK integration test (starts temporalio/auto-setup)
   otel        Run OpenTelemetry integration test (starts otel-collector)
   integration Run both temporal + otel integration tests
@@ -156,6 +157,72 @@ cmd_zts() {
     [ "$failed" -eq 0 ] || exit 1
 }
 
+cmd_zts_highthread() {
+    build_target test-zts
+
+    info "Starting FrankenPHP with 400 threads (pthread_key exhaustion test)"
+    docker rm -f "$CONTAINER" 2>/dev/null || true
+    docker run -d --name "$CONTAINER" \
+        -p 8099:8080 \
+        -e PHP_NUM_THREADS=400 \
+        -e PHP_MAX_THREADS=500 \
+        "${IMAGE}:test-zts" \
+        frankenphp run --config /app/tests/Caddyfile.highthread
+
+    info "Waiting for FrankenPHP to start"
+    local retries=60
+    while ! docker exec "$CONTAINER" php -r "echo 'ok';" &>/dev/null; do
+        retries=$((retries - 1))
+        if [ "$retries" -le 0 ]; then
+            fail "Container failed to start within 30s"
+            docker logs "$CONTAINER"
+            docker rm -f "$CONTAINER" 2>/dev/null || true
+            exit 1
+        fi
+        sleep 0.5
+    done
+
+    info "Verifying extension loaded in 400-thread container"
+    docker exec "$CONTAINER" php -r "echo 'grpc loaded: ' . (extension_loaded('grpc') ? 'yes' : 'no') . PHP_EOL;"
+
+    info "Sustained stress test: 500 concurrent requests x 3 waves"
+    info "This reproduces the 'out of TLS keys' crash when Go/CGo exhausts PTHREAD_KEYS_MAX (1024)"
+    local failed=0
+    for wave in $(seq 1 3); do
+        for i in $(seq 1 500); do
+            curl -sf -m 15 http://localhost:8099/test_zts_stress.php > /dev/null 2>&1 &
+        done
+        wait
+        echo "--- Wave $wave/3 complete ---"
+
+        if ! docker exec "$CONTAINER" php -r "echo 'alive';" &>/dev/null; then
+            echo ""
+            fail "Container crashed during wave $wave!"
+            warn "Logs:"
+            docker logs "$CONTAINER" 2>&1 | grep -iE "fatal|abort|tls.key|panic" | tail -5
+            failed=1
+            break
+        fi
+    done
+
+    echo ""
+    if [ "$failed" -eq 0 ]; then
+        info "Checking container still alive after all waves"
+        if docker exec "$CONTAINER" php -r "echo 'alive';"; then
+            echo ""
+            ok "Container survived 1500 concurrent gRPC requests at 400 threads!"
+            ok "No 'out of TLS keys' — warmup_tls() pre-allocated all pthread keys before Go threads."
+        else
+            echo ""
+            fail "Container crashed — check: docker logs $CONTAINER"
+            failed=1
+        fi
+    fi
+
+    docker rm -f "$CONTAINER" 2>/dev/null || true
+    [ "$failed" -eq 0 ] || exit 1
+}
+
 cmd_temporal() {
     info "Running Temporal SDK integration test"
     warn "This starts temporalio/auto-setup — may take ~30s on first run"
@@ -228,6 +295,7 @@ case "$command" in
     leak)        cmd_leak ;;
     streaming)   cmd_streaming ;;
     zts)         cmd_zts ;;
+    zts-highthread) cmd_zts_highthread ;;
     temporal)    cmd_temporal ;;
     otel)        cmd_otel ;;
     integration) cmd_integration ;;

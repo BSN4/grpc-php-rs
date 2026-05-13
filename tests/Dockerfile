@@ -105,6 +105,7 @@ RUN EXT_DIR="$(cat /tmp/ext_dir)" \
 
 COPY tests/ /app/tests/
 COPY tests/Caddyfile.test /etc/caddy/Caddyfile
+COPY tests/Caddyfile.highthread /app/tests/Caddyfile.highthread
 WORKDIR /app
 
 # ---------------------------------------------------------------------------

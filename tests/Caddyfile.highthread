@@ -1,0 +1,12 @@
+{
+    frankenphp {
+        num_threads {$PHP_NUM_THREADS:400}
+        max_threads {$PHP_MAX_THREADS:500}
+    }
+    order php_server before file_server
+}
+
+:8080 {
+    root * /app/tests
+    php_server
+}

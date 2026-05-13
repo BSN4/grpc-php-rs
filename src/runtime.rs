@@ -21,6 +21,38 @@ pub fn get_runtime() -> Result<&'static Runtime, GrpcError> {
         .ok_or_else(|| GrpcError::RuntimeInit(std::io::Error::other("runtime init failed")))
 }
 
+/// Force-initialize the tokio runtime and exercise a dummy async block so that
+/// all `thread_local!` statics in tokio, hyper, h2, and rustls eagerly allocate
+/// their `pthread_key_t` slots on the **main thread during MINIT** — before
+/// FrankenPHP's Go runtime creates PHP worker threads.
+///
+/// Why this matters: Go/CGo allocates 3 pthread keys per OS thread.  With 350
+/// FrankenPHP worker threads that is 1 050 keys — exceeding PTHREAD_KEYS_MAX
+/// (1 024).  If any Rust `thread_local!` is still lazy when a worker thread
+/// first touches it, `pthread_key_create` returns EAGAIN and the Rust stdlib
+/// aborts with "out of TLS keys".  Warming up here ensures every Rust key is
+/// allocated while slots are still available; subsequent per-thread access only
+/// calls `pthread_setspecific` (which never fails).
+pub fn warmup_tls() {
+    if let Ok(rt) = get_runtime() {
+        // Enter the runtime context — triggers TLS init in tokio's
+        // context, driver, and scheduler modules.
+        let _guard = rt.enter();
+
+        // Run a trivial future that touches the hyper/h2 code path
+        // (Endpoint::connect_lazy → Channel) to force lazy statics in
+        // the HTTP/2 and TLS stacks to initialize their keys now.
+        rt.block_on(async {
+            // A minimal tonic Endpoint + connect_lazy touches:
+            //   - hyper connection pool thread-locals
+            //   - h2 codec thread-locals
+            //   - rustls session cache thread-locals
+            let ep = tonic::transport::Endpoint::from_static("http://[::1]:1");
+            let _ch = ep.connect_lazy();
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

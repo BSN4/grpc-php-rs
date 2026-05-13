@@ -46,6 +46,10 @@ mod compat;
 // ---------------------------------------------------------------------------
 
 fn register_constants(_ty: i32, mod_num: i32) -> i32 {
+    // Force-allocate all Rust/tokio pthread TLS keys while PTHREAD_KEYS_MAX
+    // slots are still available — before FrankenPHP spawns Go worker threads.
+    crate::runtime::warmup_tls();
+
     use ext_php_rs::constant::IntoConst;
 
     macro_rules! reg {
