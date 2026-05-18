@@ -42,6 +42,15 @@ pub use timeval::GrpcTimeval;
 mod compat;
 
 // ---------------------------------------------------------------------------
+// Version reported to PHP via `phpversion('grpc')` and `Grpc\VERSION`.
+// Mirrors the latest stable ext-grpc release so PHP libraries that do
+// `version_compare()` checks against this value (e.g. google-ads-php) don't
+// reject us. Bump when ext-grpc publishes a new stable.
+// Our own crate version lives in Cargo.toml + git tags and is unrelated.
+// ---------------------------------------------------------------------------
+const EXT_GRPC_COMPAT_VERSION: &str = "1.80.0";
+
+// ---------------------------------------------------------------------------
 // Constants — registered via module startup
 // ---------------------------------------------------------------------------
 
@@ -107,8 +116,8 @@ fn register_constants(_ty: i32, mod_num: i32) -> i32 {
     reg!("Grpc\\WRITE_BUFFER_HINT", 1i64, mod_num);
     reg!("Grpc\\WRITE_NO_COMPRESS", 2i64, mod_num);
 
-    // Version
-    if "1.78.0"
+    // Version — see EXT_GRPC_COMPAT_VERSION at top of file
+    if EXT_GRPC_COMPAT_VERSION
         .to_string()
         .register_constant("Grpc\\VERSION", mod_num)
         .is_err()
@@ -124,6 +133,10 @@ fn register_constants(_ty: i32, mod_num: i32) -> i32 {
 pub fn get_module(module: ModuleBuilder) -> ModuleBuilder {
     module
         .name("grpc")
+        // Override the version ext-php-rs derives from CARGO_PKG_VERSION so
+        // `phpversion('grpc')` reports the C ext-grpc-compatible version
+        // (see EXT_GRPC_COMPAT_VERSION at top of file).
+        .version(EXT_GRPC_COMPAT_VERSION)
         .class::<GrpcChannel>()
         .class::<GrpcCall>()
         .class::<GrpcChannelCredentials>()
