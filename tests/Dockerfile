@@ -135,8 +135,9 @@ COPY --from=test-server-builder /build/target/release/grpc-test-server /usr/loca
 COPY tests/test_streaming.php /app/tests/test_streaming.php
 
 COPY tests/test_empty_response.php /app/tests/test_empty_response.php
+COPY tests/test_plugin_exception.php /app/tests/test_plugin_exception.php
 
-CMD ["sh", "-c", "grpc-test-server & sleep 1 && php tests/test_streaming.php && php tests/test_empty_response.php"]
+CMD ["sh", "-c", "grpc-test-server & sleep 1 && php tests/test_streaming.php && php tests/test_empty_response.php && php tests/test_plugin_exception.php"]
 
 # ---------------------------------------------------------------------------
 # Stage 9c: Binary trailing metadata test runner

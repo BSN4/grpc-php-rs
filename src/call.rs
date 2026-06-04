@@ -68,6 +68,7 @@ fn array_key_to_string(key: &ArrayKey<'_>) -> Option<String> {
     match key {
         ArrayKey::String(s) => Some(s.clone()),
         ArrayKey::Str(s) => Some((*s).to_string()),
+        ArrayKey::ZendString(zs) => zs.as_str().ok().map(ToString::to_string),
         ArrayKey::Long(_) => None,
     }
 }
@@ -82,6 +83,11 @@ fn array_key_to_long(key: &ArrayKey<'_>) -> Result<i64, GrpcError> {
         ArrayKey::Str(s) => s
             .parse::<i64>()
             .map_err(|_| GrpcError::InvalidArg(format!("invalid op key: {s}"))),
+        ArrayKey::ZendString(zs) => zs
+            .as_str()
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok())
+            .ok_or_else(|| GrpcError::InvalidArg("invalid op key".into())),
     }
 }
 
@@ -100,9 +106,32 @@ fn invoke_call_plugin(
     let callable = ZendCallable::new(zval)
         .map_err(|_| GrpcError::CallbackFailed("stored value is not callable".into()))?;
 
+    // IMPORTANT: never Debug- or Display-format `ext_php_rs::error::Error` here.
+    // The `Exception` variant formats the thrown PHP object graph, which is
+    // cyclic (exception traces reference objects that reference the exception)
+    // and ext-php-rs's derived Debug has no cycle detection — formatting it
+    // recurses until the stack overflows (SIGSEGV). Extract the class name and
+    // message properties ourselves instead.
     let result = callable
         .try_call(vec![&service_url.to_string()])
-        .map_err(|e| GrpcError::CallbackFailed(format!("{e:?}")))?;
+        .map_err(|e| {
+            let msg = match &e {
+                ext_php_rs::error::Error::Exception(obj) => {
+                    let class = obj
+                        .get_class_name()
+                        .unwrap_or_else(|_| "Exception".to_string());
+                    // `$message` is protected — call the public getter instead.
+                    let message = obj
+                        .try_call_method("getMessage", vec![])
+                        .ok()
+                        .and_then(|zv| zv.string())
+                        .unwrap_or_default();
+                    format!("plugin threw {class}: {message}")
+                }
+                other => format!("{other}"),
+            };
+            GrpcError::CallbackFailed(msg)
+        })?;
 
     // The callback returns metadata as key => value or key => [values]
     // (Google Cloud SDK returns e.g. ['authorization' => ['Bearer xxx']])
