@@ -48,7 +48,7 @@ mod compat;
 // reject us. Bump when ext-grpc publishes a new stable.
 // Our own crate version lives in Cargo.toml + git tags and is unrelated.
 // ---------------------------------------------------------------------------
-const EXT_GRPC_COMPAT_VERSION: &str = "1.81.0";
+const EXT_GRPC_COMPAT_VERSION: &str = "1.82.0";
 
 // ---------------------------------------------------------------------------
 // Constants — registered via module startup
