@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Priority support for sponsors
+    url: https://github.com/sponsors/BSN4
+    about: Companies running grpc-php-rs in production get prioritized triage through sponsorship.

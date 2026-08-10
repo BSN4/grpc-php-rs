@@ -1,0 +1,15 @@
+name: Feature request
+description: Missing API surface or capability
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What's missing?
+      description: If ext-grpc has it, say how it behaves there — that makes it a compatibility item with a ready specification.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: What does it unblock for you?

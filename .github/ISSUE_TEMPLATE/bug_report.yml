@@ -1,0 +1,51 @@
+name: Bug report
+description: Something crashes, hangs, or misbehaves
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: grpc-php-rs version
+      placeholder: v0.3.0
+    validations:
+      required: true
+  - type: input
+    id: php
+    attributes:
+      label: PHP version and SAPI
+      placeholder: 8.4.24 NTS cli / 8.5 ZTS FrankenPHP
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options: [Docker image, PIE, Manual .so, Built from source]
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: Linux glibc x86_64 / Alpine ARM64 / macOS ARM64
+    validations:
+      required: true
+  - type: input
+    id: library
+    attributes:
+      label: Client library in use (if any)
+      placeholder: google/cloud-spanner 1.x, temporal/sdk, raw Grpc\ API, …
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: Smallest PHP script or steps that show the problem.
+      render: php
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happens, and what did you expect?
+    validations:
+      required: true

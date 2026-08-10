@@ -1,0 +1,46 @@
+name: Compatibility divergence
+description: Behavior differs from the official ext-grpc extension
+labels: [parity]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        These are the most valuable reports this project receives. Every
+        confirmed divergence becomes a case in the parity ledger
+        (`tests/test_ext_grpc_parity.php`) and gets fixed against proven
+        ext-grpc behavior.
+  - type: input
+    id: version
+    attributes:
+      label: grpc-php-rs version
+    validations:
+      required: true
+  - type: textarea
+    id: script
+    attributes:
+      label: Script demonstrating the difference
+      description: Ideally runnable under both extensions unchanged.
+      render: php
+    validations:
+      required: true
+  - type: textarea
+    id: ours
+    attributes:
+      label: Observed under grpc-php-rs
+    validations:
+      required: true
+  - type: textarea
+    id: theirs
+    attributes:
+      label: Observed under official ext-grpc
+      description: |
+        Include the ext-grpc version. If you can't run ext-grpc, say so —
+        we'll verify with the dual-run harness, but firsthand output speeds
+        things up considerably.
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Real-world impact
+      placeholder: Which library/workflow breaks because of this?
