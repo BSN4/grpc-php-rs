@@ -137,7 +137,7 @@ COPY tests/test_streaming.php /app/tests/test_streaming.php
 COPY tests/test_empty_response.php /app/tests/test_empty_response.php
 COPY tests/test_plugin_exception.php /app/tests/test_plugin_exception.php
 
-CMD ["sh", "-c", "grpc-test-server & sleep 1 && php tests/test_streaming.php && php tests/test_empty_response.php && php tests/test_plugin_exception.php"]
+CMD ["sh", "-c", "grpc-test-server & sleep 1 && php tests/test_streaming.php && php tests/test_empty_response.php && php tests/test_plugin_exception.php && php tests/test_async_unary.php"]
 
 # ---------------------------------------------------------------------------
 # Stage 9bb: Split-batch unary test runner (start() then wait())
@@ -149,6 +149,18 @@ COPY tests/test_unary_split.php /app/tests/test_unary_split.php
 CMD ["sh", "-c", "grpc-test-server & sleep 1 && php tests/test_unary_split.php"]
 
 # ---------------------------------------------------------------------------
+# Stage 9bc: gax-style promise concurrency test (issue #18) — drives the real
+# grpc/grpc library + Guzzle promises, the layer google/shopping-merchant-products
+# and every google-cloud-php client use for async batches.
+FROM test-base AS test-promises
+
+RUN composer require --working-dir=/app grpc/grpc:^1.74 guzzlehttp/promises:^2 --prefer-dist --no-interaction --quiet
+COPY --from=test-server-builder /build/target/release/grpc-test-server /usr/local/bin/grpc-test-server
+COPY tests/test_promise_concurrency.php /app/tests/test_promise_concurrency.php
+
+CMD ["sh", "-c", "grpc-test-server & sleep 1 && php tests/test_promise_concurrency.php"]
+
+# ---------------------------------------------------------------------------
 # Stage 9c: Binary trailing metadata test runner
 FROM test-base AS test-binary-trailer
 
@@ -156,6 +168,30 @@ COPY --from=test-server-builder /build/target/release/grpc-test-server /usr/loca
 COPY tests/test_binary_trailer.php /app/tests/test_binary_trailer.php
 
 CMD ["sh", "-c", "grpc-test-server & sleep 1 && php tests/test_binary_trailer.php"]
+
+# ---------------------------------------------------------------------------
+# Stage 9d: Parity probe under grpc-php-rs
+FROM test-base AS test-parity-ours
+
+COPY --from=test-server-builder /build/target/release/grpc-test-server /usr/local/bin/grpc-test-server
+COPY tests/parity_probe.php /app/tests/parity_probe.php
+
+CMD ["sh", "-c", "grpc-test-server 2>/dev/null & sleep 1 && php tests/parity_probe.php"]
+
+# ---------------------------------------------------------------------------
+# Stage 9e: Parity probe under official ext-grpc (pecl)
+FROM php:8.5-cli AS test-parity-extgrpc
+
+RUN apt-get update && apt-get install -y --no-install-recommends $PHPIZE_DEPS zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && pecl install grpc \
+    && docker-php-ext-enable grpc
+
+COPY --from=test-server-builder /build/target/release/grpc-test-server /usr/local/bin/grpc-test-server
+WORKDIR /app
+COPY tests/parity_probe.php /app/tests/parity_probe.php
+
+CMD ["sh", "-c", "grpc-test-server 2>/dev/null & sleep 1 && php tests/parity_probe.php"]
 
 # ---------------------------------------------------------------------------
 # Stage 10: Integration test base — Temporal SDK

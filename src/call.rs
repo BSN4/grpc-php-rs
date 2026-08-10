@@ -114,6 +114,13 @@ fn now_usec() -> i64 {
 /// CANCELLED arriving after the deadline we set is reported as the deadline.
 /// Cancellation through `Call::cancel()` never reaches here; it is answered
 /// from the cancellation token instead.
+/// True when a real deadline is set and has already passed. ext-grpc fails
+/// such calls locally as DEADLINE_EXCEEDED without ever sending the request;
+/// racing a minimal timeout against a fast response is not equivalent.
+fn deadline_already_expired(deadline_usec: i64) -> bool {
+    deadline_usec > 0 && deadline_usec < i64::MAX && deadline_usec <= now_usec()
+}
+
 fn status_to_php(status: &tonic::Status, deadline_usec: i64) -> (i32, String) {
     let code = status.code() as i32;
     let deadline_set = deadline_usec > 0 && deadline_usec < i64::MAX;
@@ -433,6 +440,18 @@ impl GrpcCall {
                         invoke_call_plugin(plugin, &self.method).map_err(PhpException::from)?;
                     self.pending_metadata.extend(plugin_md);
                 }
+
+                // Half-closed split start (gax UnaryCall / ServerStreamingCall
+                // start()): dispatch the request now so N async calls overlap
+                // on the wire instead of each paying its full round trip in
+                // wait() (issue #18). The recv batch collects the in-flight
+                // result via the stream machinery — a unary response is just
+                // a stream of one message plus trailers.
+                if batch.send_close {
+                    let send_metadata = std::mem::take(&mut self.pending_metadata);
+                    let send_message = self.pending_message.take();
+                    self.start_server_stream(send_metadata, Vec::new(), send_message)?;
+                }
             }
 
             return Ok(ZendObject::new_stdclass());
@@ -555,6 +574,16 @@ impl GrpcCall {
         let max_decoding = self.max_decoding_message_size;
         let max_encoding = self.max_encoding_message_size;
 
+        if deadline_already_expired(deadline_usec) {
+            return Ok((
+                None,
+                None,
+                Some(tonic::metadata::MetadataMap::default()),
+                4, // DEADLINE_EXCEEDED
+                "Deadline Exceeded".to_string(),
+            ));
+        }
+
         let result: Result<CallResult, GrpcError> = rt.block_on(async move {
             // Build the path
             let path = PathAndQuery::try_from(method.as_str())
@@ -583,10 +612,11 @@ impl GrpcCall {
 
             // Apply deadline/timeout
             if deadline_usec < i64::MAX && deadline_usec > 0 {
-                let timeout_usec = deadline_usec.saturating_sub(now_usec());
-                if timeout_usec > 0 {
-                    request.set_timeout(std::time::Duration::from_micros(timeout_usec as u64));
-                }
+                // A deadline already in the past still sets a minimal timeout
+                // so the call reports DEADLINE_EXCEEDED (via status_to_php)
+                // like ext-grpc, instead of running without one.
+                let timeout_usec = deadline_usec.saturating_sub(now_usec()).max(1);
+                request.set_timeout(std::time::Duration::from_micros(timeout_usec as u64));
             }
 
             // Make the unary call using the raw codec, with cancellation support
@@ -799,13 +829,33 @@ impl GrpcCall {
         }
 
         if deadline_usec < i64::MAX && deadline_usec > 0 {
-            let timeout_usec = deadline_usec.saturating_sub(now_usec());
-            if timeout_usec > 0 {
-                request.set_timeout(std::time::Duration::from_micros(timeout_usec as u64));
-            }
+            // See run_unary_call: expired deadlines still set a minimal
+            // timeout so the call fails as DEADLINE_EXCEEDED like ext-grpc.
+            let timeout_usec = deadline_usec.saturating_sub(now_usec()).max(1);
+            request.set_timeout(std::time::Duration::from_micros(timeout_usec as u64));
         }
 
         request
+    }
+
+    /// Stream state for a call whose deadline had already passed at dispatch:
+    /// no task is spawned and nothing is sent; reads see end-of-stream and
+    /// the status reports DEADLINE_EXCEEDED, matching ext-grpc.
+    fn expired_stream_state() -> ActiveStream {
+        let (_tx, msg_rx) =
+            tokio::sync::mpsc::channel::<Result<Option<Bytes>, tonic::Status>>(1);
+        ActiveStream {
+            msg_tx: None,
+            msg_rx,
+            initial_metadata: None,
+            meta_rx: None,
+            cached_trailers: Some(StreamTrailers {
+                code: 4, // DEADLINE_EXCEEDED
+                message: "Deadline Exceeded".to_string(),
+                metadata: tonic::metadata::MetadataMap::default(),
+            }),
+            trailers_rx: None,
+        }
     }
 
     /// Initiate a server streaming call. Spawns a tokio task that drives
@@ -817,6 +867,11 @@ impl GrpcCall {
         send_message: Option<Bytes>,
     ) -> PhpResult<()> {
         let rt = get_runtime().map_err(PhpException::from)?;
+
+        if deadline_already_expired(self.deadline_usec) {
+            self.stream_state = Some(Self::expired_stream_state());
+            return Ok(());
+        }
 
         let channel = self.channel.clone();
         let method = self.method.clone();
@@ -933,15 +988,15 @@ impl GrpcCall {
             }
         });
 
-        // Synchronously wait for initial metadata (the stream task sends it
-        // as soon as the server responds with headers).
-        let initial_metadata = rt.block_on(meta_rx).ok();
-
+        // Initial metadata stays deferred: build_stream_result resolves the
+        // receiver on the first RECV_INITIAL_METADATA. Blocking here would
+        // serialize eagerly-dispatched calls (issue #18) — headers only
+        // arrive once the server responds.
         self.stream_state = Some(ActiveStream {
             msg_tx: None,
             msg_rx,
-            initial_metadata,
-            meta_rx: None,
+            initial_metadata: None,
+            meta_rx: Some(meta_rx),
             cached_trailers: None,
             trailers_rx: Some(trailers_rx),
         });
@@ -957,6 +1012,11 @@ impl GrpcCall {
         plugin_metadata: Vec<(String, String)>,
     ) -> PhpResult<()> {
         let rt = get_runtime().map_err(PhpException::from)?;
+
+        if deadline_already_expired(self.deadline_usec) {
+            self.stream_state = Some(Self::expired_stream_state());
+            return Ok(());
+        }
 
         let channel = self.channel.clone();
         let method = self.method.clone();
@@ -990,10 +1050,10 @@ impl GrpcCall {
             }
         }
         if deadline_usec < i64::MAX && deadline_usec > 0 {
-            let timeout_usec = deadline_usec.saturating_sub(now_usec());
-            if timeout_usec > 0 {
-                request.set_timeout(std::time::Duration::from_micros(timeout_usec as u64));
-            }
+            // See run_unary_call: expired deadlines still set a minimal
+            // timeout so the call fails as DEADLINE_EXCEEDED like ext-grpc.
+            let timeout_usec = deadline_usec.saturating_sub(now_usec()).max(1);
+            request.set_timeout(std::time::Duration::from_micros(timeout_usec as u64));
         }
 
         // Response channels

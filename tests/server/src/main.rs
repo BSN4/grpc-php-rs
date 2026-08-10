@@ -22,7 +22,17 @@ impl TestService for TestServiceImpl {
     type BidiEchoStream = ReceiverStream<Result<Payload, Status>>;
 
     async fn echo(&self, request: Request<Payload>) -> Result<Response<Payload>, Status> {
-        let mut response = Response::new(request.into_inner());
+        let payload = request.into_inner();
+        // A body of "sleep:N" delays the response by N ms (used to test
+        // concurrent in-flight calls).
+        if let Some(ms) = std::str::from_utf8(&payload.body)
+            .ok()
+            .and_then(|s| s.strip_prefix("sleep:"))
+            .and_then(|n| n.parse::<u64>().ok())
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        }
+        let mut response = Response::new(payload);
         // Attach a binary trailer so PHP clients can verify their extension
         // surfaces `-bin` metadata. Payload contains a NUL and non-UTF-8 byte
         // to make sure raw bytes survive intact (no string conversion).

@@ -31,6 +31,8 @@ Commands:
   leak        Run memory leak test with local gRPC test server
   streaming   Run server streaming test with local gRPC test server
   unary       Run split-batch unary test with local gRPC test server
+  promises    Run gax-style promise concurrency test (grpc/grpc + guzzle)
+  parity      Diff observable behavior against official ext-grpc (pecl)
   zts         Run ZTS stress test with FrankenPHP + concurrent requests
   temporal    Run Temporal SDK integration test (starts temporalio/auto-setup)
   otel        Run OpenTelemetry integration test (starts otel-collector)
@@ -108,6 +110,32 @@ cmd_unary() {
     info "Running split-batch unary test"
     run_target test-unary
     ok "Split-batch unary test passed"
+}
+
+cmd_promises() {
+    build_target test-promises
+    info "Running gax-style promise concurrency test"
+    run_target test-promises
+    ok "Promise concurrency test passed"
+}
+
+cmd_parity() {
+    build_target test-parity-ours
+    build_target test-parity-extgrpc
+
+    info "Running probe under grpc-php-rs"
+    local ours ext
+    ours=$(docker run --rm "${IMAGE}:test-parity-ours")
+    info "Running probe under official ext-grpc"
+    ext=$(docker run --rm "${IMAGE}:test-parity-extgrpc")
+
+    if diff <(echo "$ext") <(echo "$ours") > /tmp/grpc_parity.diff; then
+        ok "Parity: identical observable behavior (ext-grpc vs grpc-php-rs)"
+    else
+        fail "Parity divergence (< ext-grpc, > grpc-php-rs):"
+        cat /tmp/grpc_parity.diff
+        exit 1
+    fi
 }
 
 cmd_zts() {
@@ -220,6 +248,8 @@ cmd_all() {
     echo ""
     cmd_unary
     echo ""
+    cmd_promises
+    echo ""
     cmd_leak
     echo ""
     ok "All tests passed"
@@ -238,6 +268,8 @@ case "$command" in
     leak)        cmd_leak ;;
     streaming)   cmd_streaming ;;
     unary)       cmd_unary ;;
+    promises)    cmd_promises ;;
+    parity)      cmd_parity ;;
     zts)         cmd_zts ;;
     temporal)    cmd_temporal ;;
     otel)        cmd_otel ;;
