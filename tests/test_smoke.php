@@ -34,8 +34,8 @@ check('OP_RECV_STATUS_ON_CLIENT = 6', defined('Grpc\\OP_RECV_STATUS_ON_CLIENT') 
 check('CALL_OK = 0', defined('Grpc\\CALL_OK') && Grpc\CALL_OK === 0);
 check('WRITE_NO_COMPRESS = 2', defined('Grpc\\WRITE_NO_COMPRESS') && Grpc\WRITE_NO_COMPRESS === 2);
 check('VERSION defined', defined('Grpc\\VERSION') && is_string(Grpc\VERSION));
-check('Grpc\\VERSION === 1.82.0', defined('Grpc\\VERSION') && Grpc\VERSION === '1.82.0');
-check('phpversion(grpc) === 1.82.0', phpversion('grpc') === '1.82.0');
+check('Grpc\\VERSION === 1.83.0', defined('Grpc\\VERSION') && Grpc\VERSION === '1.83.0');
+check('phpversion(grpc) === 1.83.0', phpversion('grpc') === '1.83.0');
 
 // ChannelCredentials methods
 check('createSsl() callable', method_exists('Grpc\\ChannelCredentials', 'createSsl'));
