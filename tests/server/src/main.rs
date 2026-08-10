@@ -47,19 +47,14 @@ impl TestService for TestServiceImpl {
         &self,
         _request: Request<Payload>,
     ) -> Result<Response<Payload>, Status> {
-        // Attach a binary trailer via Status metadata. This is the path real
-        // services use for rich-status / google.rpc.Status propagation in
-        // `grpc-status-details-bin`. Surfaces to PHP through the trailing
-        // metadata in OP_RECV_STATUS_ON_CLIENT.
-        let mut md = tonic::metadata::MetadataMap::new();
-        md.insert_bin(
-            "x-test-binary-bin",
-            tonic::metadata::MetadataValue::from_bytes(b"hello\x00\xfftrailer"),
-        );
-        Err(Status::with_metadata(
+        // `with_details` serializes this as tonic's reserved
+        // `grpc-status-details-bin` header. The client then reconstructs the
+        // Status using `Status::from_header_map`, which moves this payload out
+        // of `status.metadata()` and into `status.details()`.
+        Err(Status::with_details(
             tonic::Code::Internal,
             "test error",
-            md,
+            b"hello\x00\xfftrailer".to_vec().into(),
         ))
     }
 
@@ -78,6 +73,19 @@ impl TestService for TestServiceImpl {
             .and_then(|n| n.parse::<usize>().ok());
 
         tokio::spawn(async move {
+            // End a stream after response headers with a rich status. This
+            // exercises the client's `Streaming::message()` error path.
+            if payload.body.as_slice() == b"stream-status-error" {
+                let _ = tx
+                    .send(Err(Status::with_details(
+                        tonic::Code::Internal,
+                        "stream test error",
+                        b"hello\x00\xfftrailer".to_vec().into(),
+                    )))
+                    .await;
+                return;
+            }
+
             match repeat {
                 Some(n) => {
                     let msg = Payload { body: b"x".to_vec() };
