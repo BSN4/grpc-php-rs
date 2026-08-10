@@ -404,6 +404,119 @@ ledger('roots-pem-late-creds-work', true, 'code=0', 'code=0', function () {
     return 'code=' . $r->status->code;
 });
 
+
+// ═════════ Code-review findings, each verified by dual-run (2026-08-12) ═════
+// Refuted and NOT listed: post-status RECV_MESSAGE returning null (ext-grpc
+// blocks forever there; our LogicException is defensible), and
+// watchConnectivityState(infFuture) "hanging" (ext-grpc blocks identically).
+
+ledger('stream-status-midstream-no-deadlock', true, 'code=0 msg=present', 'code=0 msg=present', function () {
+    // Asking for a message + final status mid-stream must not deadlock when
+    // the server has more than STREAM_MSG_BUFFER messages queued.
+    $call = new Grpc\Call(chan(), '/grpc.testing.TestService/StreamEcho', dl3());
+    $call->startBatch([Grpc\OP_SEND_INITIAL_METADATA=>[], Grpc\OP_SEND_MESSAGE=>['message'=>ep('repeat:100')],
+        Grpc\OP_SEND_CLOSE_FROM_CLIENT=>true]);
+    $r = $call->startBatch([Grpc\OP_RECV_MESSAGE=>true, Grpc\OP_RECV_STATUS_ON_CLIENT=>true]);
+    return sprintf('code=%d msg=%s', $r->status->code, $r->message === null ? 'null' : 'present');
+});
+
+ledger('send-metadata-with-message-same-batch', false, 'x-f2a:76', '(none)', function () {
+    $call = new Grpc\Call(chan(), '/grpc.testing.TestService/EchoMetadata', dl3());
+    $call->startBatch([Grpc\OP_SEND_INITIAL_METADATA=>['x-f2a'=>['v']], Grpc\OP_SEND_MESSAGE=>['message'=>ep('x')]]);
+    $call->startBatch([Grpc\OP_SEND_CLOSE_FROM_CLIENT=>true]);
+    $r = $call->startBatch([Grpc\OP_RECV_INITIAL_METADATA=>true, Grpc\OP_RECV_MESSAGE=>true, Grpc\OP_RECV_STATUS_ON_CLIENT=>true]);
+    if ($r->status->code !== 0) return "status={$r->status->code}";
+    $k = array_filter(explode("\n", decode_body($r->message)), fn($l) => str_starts_with($l, 'x-f2a'));
+    return implode(' | ', $k) ?: '(none)';
+});
+
+ledger('send-metadata-then-message-batch', false, 'x-f2b:76', '(none)', function () {
+    $call = new Grpc\Call(chan(), '/grpc.testing.TestService/EchoMetadata', dl3());
+    $call->startBatch([Grpc\OP_SEND_INITIAL_METADATA=>['x-f2b'=>['v']]]);
+    $call->startBatch([Grpc\OP_SEND_MESSAGE=>['message'=>ep('x')], Grpc\OP_SEND_CLOSE_FROM_CLIENT=>true]);
+    $r = $call->startBatch([Grpc\OP_RECV_INITIAL_METADATA=>true, Grpc\OP_RECV_MESSAGE=>true, Grpc\OP_RECV_STATUS_ON_CLIENT=>true]);
+    if ($r->status->code !== 0) return "status={$r->status->code}";
+    $k = array_filter(explode("\n", decode_body($r->message)), fn($l) => str_starts_with($l, 'x-f2b'));
+    return implode(' | ', $k) ?: '(none)';
+});
+
+// ext-grpc rejects the illegal value with status 13 rather than corrupting it;
+// we lossy-decode non-UTF-8 bytes to U+FFFD and silently drop control bytes.
+ledger('send-metadata-raw-bytes-not-corrupted', false, 'status=13', 'x-f3raw:6869efbfbdefbfbd', function () {
+    $call = new Grpc\Call(chan(), '/grpc.testing.TestService/EchoMetadata', dl3());
+    try {
+        $r = $call->startBatch([Grpc\OP_SEND_INITIAL_METADATA=>['x-f3raw'=>["hi\xff\xfe"], 'x-f3ctl'=>["tok\nnl"]],
+            Grpc\OP_SEND_MESSAGE=>['message'=>ep('x')], Grpc\OP_SEND_CLOSE_FROM_CLIENT=>true,
+            Grpc\OP_RECV_INITIAL_METADATA=>true, Grpc\OP_RECV_MESSAGE=>true, Grpc\OP_RECV_STATUS_ON_CLIENT=>true]);
+    } catch (Throwable $e) { return get_class($e); }
+    if ($r->status->code !== 0) return "status={$r->status->code}";
+    $k = array_filter(explode("\n", decode_body($r->message)), fn($l) => str_starts_with($l, 'x-f3'));
+    sort($k);
+    return implode(' | ', $k) ?: '(none)';
+});
+
+ledger('infpast-deadline-fails-immediately', false, 'code=4', 'code=0', function () {
+    $call = new Grpc\Call(chan(), ECHO_M, Grpc\Timeval::infPast());
+    $r = $call->startBatch(fullBatch());
+    return 'code=' . $r->status->code;
+});
+
+ledger('timeval-zero-is-absolute', false, 'code=4', 'code=0', function () {
+    $d = Grpc\Timeval::zero()->add(new Grpc\Timeval(5_000_000));
+    $call = new Grpc\Call(chan(), '/grpc.testing.TestService/SlowEcho', $d);
+    $r = $call->startBatch(fullBatch());
+    return 'code=' . $r->status->code;
+});
+
+ledger('sleepuntil-honors-span', false, 'slept', 'instant', function () {
+    $t0 = microtime(true);
+    (new Grpc\Timeval(400_000))->sleepUntil();
+    return (microtime(true) - $t0) >= 0.3 ? 'slept' : 'instant';
+});
+
+ledger('plugin-invoked-once-per-call', false, '1', '2', function () {
+    $n = 0;
+    $cc = Grpc\CallCredentials::createFromPlugin(function ($c) use (&$n) { $n++; return []; });
+    $call = new Grpc\Call(chan(), '/grpc.testing.TestService/EchoMetadata', dl3());
+    $call->setCredentials($cc);
+    $call->startBatch([Grpc\OP_SEND_INITIAL_METADATA=>[]]);
+    $call->startBatch([Grpc\OP_SEND_MESSAGE=>['message'=>ep('x')]]);
+    $call->startBatch([Grpc\OP_SEND_CLOSE_FROM_CLIENT=>true]);
+    $call->startBatch([Grpc\OP_RECV_INITIAL_METADATA=>true, Grpc\OP_RECV_MESSAGE=>true, Grpc\OP_RECV_STATUS_ON_CLIENT=>true]);
+    return (string)$n;
+});
+
+ledger('getpeer-no-io-before-connect', false, 'target-ish', 'fabricated-ip', function () {
+    // ext-grpc reports the transport peer with zero I/O; we resolve DNS on the
+    // PHP thread and invent an address for a call that never connected.
+    $call = new Grpc\Call(chan(), ECHO_M, dl3());
+    $p = $call->getPeer();
+    return (str_starts_with($p, 'ipv4:') || str_starts_with($p, 'ipv6:')) ? 'fabricated-ip' : 'target-ish';
+});
+
+ledger('server-side-op-logic-exception', false, 'LogicException(3)', 'InvalidArgumentException(1)', function () {
+    $call = new Grpc\Call(chan(), ECHO_M, dl3());
+    try { $call->startBatch([Grpc\OP_RECV_CLOSE_ON_SERVER => true]); return 'accepted'; }
+    catch (Throwable $e) { return get_class($e) . '(' . $e->getCode() . ')'; }
+});
+
+ledger('string-batch-key-invalid-argument', false, 'InvalidArgumentException(1)', 'Exception(0)', function () {
+    $call = new Grpc\Call(chan(), ECHO_M, dl3());
+    try { $call->startBatch(['foo' => true]); return 'accepted'; }
+    catch (Throwable $e) { return get_class($e) . '(' . $e->getCode() . ')'; }
+});
+
+// Weak mode is what real client libraries use; the earlier coercion cases were
+// measured under declare(strict_types=1), where ext-grpc also rejects.
+ledger('weak-mode-coercion', false, 'int=ok null=ok str=ok', 'int=throw null=throw str=throw', function () {
+    $ch = chan();
+    $f = function (callable $c) { try { $c(); return 'ok'; } catch (Throwable $e) { return 'throw'; } };
+    return sprintf('int=%s null=%s str=%s',
+        $f(fn() => $ch->getConnectivityState(1)),
+        $f(fn() => @$ch->getConnectivityState(null)),
+        $f(fn() => new Grpc\Timeval('1000000')));
+});
+
 // ═══════════════════════════════ Runner ════════════════════════════════════
 
 $pass = 0;

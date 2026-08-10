@@ -1477,7 +1477,32 @@ impl GrpcCall {
             let trailers = if let Some(cached) = state.cached_trailers.take() {
                 cached
             } else if let Some(rx) = state.trailers_rx.take() {
-                rt.block_on(rx).unwrap_or(StreamTrailers {
+                // The driver task only sends trailers after the response
+                // stream ends, and it parks once STREAM_MSG_BUFFER messages
+                // are undelivered. Drain any remaining messages while waiting,
+                // otherwise asking for the status mid-stream deadlocks both
+                // sides. Undelivered messages are discarded, which is what
+                // requesting the final status means.
+                let msg_rx = &mut state.msg_rx;
+                rt.block_on(async move {
+                    tokio::pin!(rx);
+                    loop {
+                        tokio::select! {
+                            trailers = &mut rx => return trailers.ok(),
+                            msg = msg_rx.recv() => {
+                                match msg {
+                                    // Stream ended or errored — the driver is
+                                    // now free to deliver trailers.
+                                    Some(Ok(None)) | Some(Err(_)) | None => {
+                                        return (&mut rx).await.ok();
+                                    }
+                                    Some(Ok(Some(_))) => continue,
+                                }
+                            }
+                        }
+                    }
+                })
+                .unwrap_or(StreamTrailers {
                     code: 2, // UNKNOWN
                     message: "stream task terminated unexpectedly".into(),
                     metadata: tonic::metadata::MetadataMap::default(),
