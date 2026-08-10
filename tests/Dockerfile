@@ -204,6 +204,22 @@ COPY tests/parity_probe.php /app/tests/parity_probe.php
 CMD ["sh", "-c", "grpc-test-server 2>/dev/null & sleep 1 && php tests/parity_probe.php"]
 
 # ---------------------------------------------------------------------------
+# Stage 9f: Google Cloud ecosystem tests — real google/cloud-* clients driven
+# through gax against official emulators, plus construction-level checks for
+# credential-gated libraries (google-ads, shopping-merchant).
+FROM test-base AS test-integration-ecosystem
+
+RUN composer require --working-dir=/app \
+        google/cloud-pubsub google/cloud-spanner google/cloud-firestore \
+        --prefer-dist --no-interaction --quiet
+RUN mkdir /l1 && cd /l1 && composer require \
+        googleads/google-ads-php google/shopping-merchant-products \
+        --prefer-dist --no-interaction --quiet
+COPY tests/integration/ /integration/
+
+CMD ["php", "-v"]
+
+# ---------------------------------------------------------------------------
 # Stage 10: Integration test base — Temporal SDK
 FROM test-base AS test-integration-base
 

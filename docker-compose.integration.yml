@@ -38,6 +38,35 @@ services:
     # The image is distroless (no shell/wget) so a Docker healthcheck is not
     # possible.  test_otel.php handles retry-until-ready internally.
 
+  pubsub-emulator:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: ["gcloud", "beta", "emulators", "pubsub", "start", "--host-port=0.0.0.0:8085"]
+
+  firestore-emulator:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: ["gcloud", "emulators", "firestore", "start", "--host-port=0.0.0.0:8080"]
+
+  spanner-emulator:
+    image: gcr.io/cloud-spanner-emulator/emulator:latest
+    # gRPC on 9010; the PHP tests retry until it accepts connections
+
+  test-ecosystem:
+    build:
+      context: .
+      dockerfile: tests/Dockerfile
+      target: test-integration-ecosystem
+    depends_on:
+      pubsub-emulator:
+        condition: service_started
+      firestore-emulator:
+        condition: service_started
+      spanner-emulator:
+        condition: service_started
+    environment:
+      - PUBSUB_EMULATOR_HOST=pubsub-emulator:8085
+      - FIRESTORE_EMULATOR_HOST=firestore-emulator:8080
+      - SPANNER_EMULATOR_HOST=spanner-emulator:9010
+
   test-temporal:
     build:
       context: .

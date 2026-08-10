@@ -36,6 +36,7 @@ Commands:
   parity      Diff observable behavior against official ext-grpc (pecl)
   zts         Run ZTS stress test with FrankenPHP + concurrent requests
   temporal    Run Temporal SDK integration test (starts temporalio/auto-setup)
+  ecosystem   Run google/cloud-{pubsub,spanner,firestore} against emulators + lib checks
   otel        Run OpenTelemetry integration test (starts otel-collector)
   integration Run both temporal + otel integration tests
   shell       Drop into PHP CLI with extension loaded
@@ -200,6 +201,25 @@ cmd_zts() {
     [ "$failed" -eq 0 ] || exit 1
 }
 
+cmd_ecosystem() {
+    info "Running Google Cloud ecosystem tests (emulators + real clients)"
+    warn "First run pulls the cloud-sdk emulators image (~1.3GB)"
+    local COMPOSE="docker compose -f $COMPOSE_INTEGRATION"
+    trap "$COMPOSE down --volumes 2>/dev/null || true" EXIT
+    DOCKER_BUILDKIT=1 $COMPOSE build test-ecosystem
+    $COMPOSE run --rm test-ecosystem php /integration/test_pubsub.php
+    ok "Pub/Sub emulator test passed"
+    $COMPOSE run --rm test-ecosystem php /integration/test_spanner.php
+    ok "Spanner emulator test passed"
+    $COMPOSE run --rm test-ecosystem php /integration/test_firestore_emulator.php
+    ok "Firestore emulator test passed"
+    $COMPOSE run --rm test-ecosystem php /integration/test_google_libs.php
+    ok "Library construction checks passed"
+    $COMPOSE down --volumes
+    trap - EXIT
+    ok "Ecosystem tests passed"
+}
+
 cmd_temporal() {
     info "Running Temporal SDK integration test"
     warn "This starts temporalio/auto-setup — may take ~30s on first run"
@@ -283,6 +303,7 @@ case "$command" in
     parity)      cmd_parity ;;
     zts)         cmd_zts ;;
     temporal)    cmd_temporal ;;
+    ecosystem)   cmd_ecosystem ;;
     otel)        cmd_otel ;;
     integration) cmd_integration ;;
     shell)       cmd_shell ;;
