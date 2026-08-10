@@ -50,6 +50,18 @@ services:
     image: gcr.io/cloud-spanner-emulator/emulator:latest
     # gRPC on 9010; the PHP tests retry until it accepts connections
 
+  bigtable-emulator:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: ["gcloud", "beta", "emulators", "bigtable", "start", "--host-port=0.0.0.0:8086"]
+
+  datastore-emulator:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: ["gcloud", "beta", "emulators", "datastore", "start", "--project=test-project", "--host-port=0.0.0.0:8081", "--no-store-on-disk", "--use-firestore-in-datastore-mode"]
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.6.4
+    command: ["etcd", "--listen-client-urls=http://0.0.0.0:2379", "--advertise-client-urls=http://etcd:2379"]
+
   test-ecosystem:
     build:
       context: .
@@ -62,10 +74,19 @@ services:
         condition: service_started
       spanner-emulator:
         condition: service_started
+      bigtable-emulator:
+        condition: service_started
+      datastore-emulator:
+        condition: service_started
+      etcd:
+        condition: service_started
     environment:
       - PUBSUB_EMULATOR_HOST=pubsub-emulator:8085
       - FIRESTORE_EMULATOR_HOST=firestore-emulator:8080
       - SPANNER_EMULATOR_HOST=spanner-emulator:9010
+      - BIGTABLE_EMULATOR_HOST=bigtable-emulator:8086
+      - DATASTORE_EMULATOR_HOST=datastore-emulator:8081
+      - ETCD_HOST=etcd:2379
 
   test-temporal:
     build:

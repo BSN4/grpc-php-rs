@@ -33,6 +33,7 @@ Commands:
   unary       Run split-batch unary test with local gRPC test server
   promises    Run gax-style promise concurrency test (grpc/grpc + guzzle)
   ledger      Run ext-grpc parity ledger (known divergences, strict-xfail)
+  bench       Benchmark grpc-php-rs vs official ext-grpc, side by side
   parity      Diff observable behavior against official ext-grpc (pecl)
   zts         Run ZTS stress test with FrankenPHP + concurrent requests
   temporal    Run Temporal SDK integration test (starts temporalio/auto-setup)
@@ -128,6 +129,38 @@ cmd_ledger() {
     ok "Parity ledger consistent"
 }
 
+cmd_bench() {
+    build_target test-bench
+    build_target test-parity-extgrpc
+
+    info "Benchmarking grpc-php-rs"
+    local ours ext
+    ours=$(docker run --rm "${IMAGE}:test-bench")
+    info "Benchmarking official ext-grpc"
+    ext=$(docker run --rm "${IMAGE}:test-parity-extgrpc" sh -c "grpc-test-server 2>/dev/null & sleep 1 && php tests/bench.php")
+
+    info "Results (median µs; ratio >1 means grpc-php-rs is slower)"
+    python3 - "$ours" "$ext" <<'PYEOF'
+import sys
+def parse(text):
+    out = {}
+    for line in text.strip().splitlines():
+        parts = line.split('|')
+        if len(parts) == 3:
+            out[parts[0]] = (float(parts[1]), float(parts[2]))
+    return out
+ours, ext = parse(sys.argv[1]), parse(sys.argv[2])
+print(f"{'scenario':<24}{'grpc-php-rs':>14}{'ext-grpc':>14}{'ratio':>8}")
+for name in ours:
+    if name not in ext:
+        continue
+    o, e = ours[name][0], ext[name][0]
+    flag = '  <-- slower' if o > e * 1.15 else ''
+    print(f"{name:<24}{o:>12.1f}µs{e:>12.1f}µs{o/e:>8.2f}{flag}")
+PYEOF
+    ok "Benchmark complete"
+}
+
 cmd_parity() {
     build_target test-parity-ours
     build_target test-parity-extgrpc
@@ -213,6 +246,12 @@ cmd_ecosystem() {
     ok "Spanner emulator test passed"
     $COMPOSE run --rm test-ecosystem php /integration/test_firestore_emulator.php
     ok "Firestore emulator test passed"
+    $COMPOSE run --rm test-ecosystem php /integration/test_bigtable.php
+    ok "Bigtable emulator test passed"
+    $COMPOSE run --rm test-ecosystem php /integration/test_datastore.php
+    ok "Datastore emulator test passed"
+    $COMPOSE run --rm test-ecosystem php /integration/test_etcd.php
+    ok "etcd test passed"
     $COMPOSE run --rm test-ecosystem php /integration/test_google_libs.php
     ok "Library construction checks passed"
     $COMPOSE down --volumes
@@ -300,6 +339,7 @@ case "$command" in
     unary)       cmd_unary ;;
     promises)    cmd_promises ;;
     ledger)      cmd_ledger ;;
+    bench)       cmd_bench ;;
     parity)      cmd_parity ;;
     zts)         cmd_zts ;;
     temporal)    cmd_temporal ;;

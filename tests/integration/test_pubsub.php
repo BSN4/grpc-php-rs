@@ -64,7 +64,9 @@ check('payloads intact incl. 64KB', in_array('one', $received, true)
 
 $sub->delete();
 $topic->delete();
-check('cleanup delete', true);
+// Fresh objects: Topic/Subscription cache their info, so re-fetch by name.
+check('cleanup delete verified',
+    !$pubsub->topic($topic->name())->exists() && !$pubsub->subscription($sub->name())->exists());
 
 echo "\n=== {$passed}/{$tests} tests passed ===\n";
 exit($passed === $tests ? 0 : 1);

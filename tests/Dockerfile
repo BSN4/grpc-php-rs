@@ -200,8 +200,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends $PHPIZE_DEPS zl
 COPY --from=test-server-builder /build/target/release/grpc-test-server /usr/local/bin/grpc-test-server
 WORKDIR /app
 COPY tests/parity_probe.php /app/tests/parity_probe.php
+COPY tests/bench.php /app/tests/bench.php
 
 CMD ["sh", "-c", "grpc-test-server 2>/dev/null & sleep 1 && php tests/parity_probe.php"]
+
+# ---------------------------------------------------------------------------
+# Stage 9e2: Benchmark runner (grpc-php-rs side; the ext-grpc side reuses
+# test-parity-extgrpc, which also carries tests/bench.php)
+FROM test-base AS test-bench
+
+COPY --from=test-server-builder /build/target/release/grpc-test-server /usr/local/bin/grpc-test-server
+CMD ["sh", "-c", "grpc-test-server 2>/dev/null & sleep 1 && php tests/bench.php"]
 
 # ---------------------------------------------------------------------------
 # Stage 9f: Google Cloud ecosystem tests — real google/cloud-* clients driven
@@ -211,9 +220,20 @@ FROM test-base AS test-integration-ecosystem
 
 RUN composer require --working-dir=/app \
         google/cloud-pubsub google/cloud-spanner google/cloud-firestore \
+        google/cloud-bigtable google/cloud-datastore \
         --prefer-dist --no-interaction --quiet
+# aternos/etcd is isolated: it pins google/protobuf ^3 (conflicts with the
+# google/cloud tree and carries a parsing-DoS advisory). Test-only container;
+# the advisory block is relaxed here deliberately and transparently.
+RUN mkdir /etcd && cd /etcd \
+    && composer init --name test/etcd --no-interaction --quiet \
+    && composer config policy.advisories.block false \
+    && composer require aternos/etcd --prefer-dist --no-interaction --quiet --no-audit
 RUN mkdir /l1 && cd /l1 && composer require \
         googleads/google-ads-php google/shopping-merchant-products \
+        google/cloud-secret-manager google/cloud-tasks google/cloud-kms \
+        google/cloud-translate google/cloud-speech google/cloud-logging \
+        google/analytics-data google/cloud-bigquery-storage \
         --prefer-dist --no-interaction --quiet
 COPY tests/integration/ /integration/
 

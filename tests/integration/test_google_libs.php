@@ -71,5 +71,30 @@ try {
         get_class($e) . ': ' . $e->getMessage());
 }
 
+// Construction sweep across the wider google/cloud-* gRPC surface: each
+// class load + construct validates generated-client wiring, gax transport
+// creation, and extension detection.
+$sweep = [
+    'secret-manager' => ['Google\Cloud\SecretManager\V1\Client\SecretManagerServiceClient'],
+    'tasks' => ['Google\Cloud\Tasks\V2\Client\CloudTasksClient'],
+    'kms' => ['Google\Cloud\Kms\V1\Client\KeyManagementServiceClient'],
+    'translate' => ['Google\Cloud\Translate\V3\Client\TranslationServiceClient'],
+    'speech' => ['Google\Cloud\Speech\V2\Client\SpeechClient', 'Google\Cloud\Speech\V1\Client\SpeechClient'],
+    'logging' => ['Google\Cloud\Logging\V2\Client\LoggingServiceV2Client'],
+    'analytics-data' => ['Google\Analytics\Data\V1beta\Client\BetaAnalyticsDataClient'],
+    'bigquery-storage' => ['Google\Cloud\BigQuery\Storage\V1\Client\BigQueryReadClient'],
+];
+foreach ($sweep as $lib => $classes) {
+    $cls = null;
+    foreach ($classes as $c) { if (class_exists($c)) { $cls = $c; break; } }
+    if ($cls === null) { check("{$lib}: client class found", false); continue; }
+    try {
+        new $cls(['credentials' => $keyfile, 'transport' => 'grpc']);
+        check("{$lib}: constructs over grpc transport", true);
+    } catch (Throwable $e) {
+        check("{$lib}: constructs over grpc transport", false, get_class($e) . ': ' . $e->getMessage());
+    }
+}
+
 echo "\n=== {$passed}/{$tests} tests passed ===\n";
 exit($passed === $tests ? 0 : 1);
