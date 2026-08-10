@@ -75,7 +75,7 @@ function scenario(string $name, callable $fn): array {
     try {
         return $fn();
     } catch (Throwable $e) {
-        return ['exception' => get_class($e)];
+        return ['exception' => get_class($e), 'code' => $e->getCode()];
     }
 }
 
@@ -278,5 +278,13 @@ $result['cancel_mid_stream'] = scenario('cancel_mid_stream', function () use ($c
     $s = $call->startBatch([Grpc\OP_RECV_STATUS_ON_CLIENT => true]);
     return ['got_first_message' => $got_first, 'status_code' => $s->status->code];
 });
+
+// Sentinel: if the baseline scenario shows no working RPC, this probe run is
+// meaningless (dead server / dead port) and identical failure on both sides
+// must NOT diff as "parity". Fail loudly instead.
+if (($result['unary_ok']['status']['code'] ?? -1) !== 0) {
+    fwrite(STDERR, "parity probe sentinel: baseline unary failed — no valid comparison possible\n");
+    exit(1);
+}
 
 echo json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES), "\n";

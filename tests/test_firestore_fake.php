@@ -26,6 +26,8 @@ $firestore = new FirestoreClient([
     'projectId' => 'fake-project',
     'apiEndpoint' => 'localhost:1', // nothing listens here
     'transport' => 'grpc',
+    // Newer gax builds ADC at construct time without explicit credentials
+    'credentials' => new \Google\Auth\Credentials\InsecureCredentials(),
 ]);
 check('FirestoreClient instantiated', $firestore instanceof FirestoreClient);
 
@@ -70,7 +72,11 @@ try {
     $msg = $e->getMessage();
     $class = get_class($e);
     echo "  Read exception: {$class}: {$msg}\n";
-    check('Read also fails with transport error (no crash)', true);
+    $m = $e->getMessage();
+    check('Read also fails with transport error (no crash)',
+        stripos($m, 'unavailable') !== false || stripos($m, 'connect') !== false
+        || stripos($m, 'transport') !== false || str_contains($m, '14'),
+        get_class($e) . ': ' . $m);
 }
 
 echo "\n=== {$passed}/{$tests} tests passed ===\n";

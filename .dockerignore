@@ -1,5 +1,5 @@
 .git
-target
+target\n**/target
 .claude
 .DS_Store
 *.swp

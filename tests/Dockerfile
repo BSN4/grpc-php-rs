@@ -104,7 +104,11 @@ RUN EXT_DIR="$(cat /tmp/ext_dir)" \
     && rm /tmp/grpc.so /tmp/ext_dir
 
 COPY tests/ /app/tests/
+# FrankenPHP reads /etc/frankenphp/Caddyfile in current images (older ones
+# used /etc/caddy) — cover both, or the default config serves :80/:443 and
+# the stress test hits a dead :8080.
 COPY tests/Caddyfile.test /etc/caddy/Caddyfile
+COPY tests/Caddyfile.test /etc/frankenphp/Caddyfile
 WORKDIR /app
 
 # ---------------------------------------------------------------------------
@@ -237,7 +241,7 @@ RUN mkdir /l1 && cd /l1 && composer require \
         --prefer-dist --no-interaction --quiet
 COPY tests/integration/ /integration/
 
-CMD ["php", "-v"]
+CMD ["sh", "-c", "php /integration/test_pubsub.php && php /integration/test_spanner.php && php /integration/test_firestore_emulator.php && php /integration/test_bigtable.php && php /integration/test_datastore.php && php /integration/test_etcd.php && php /integration/test_google_libs.php"]
 
 # ---------------------------------------------------------------------------
 # Stage 10: Integration test base — Temporal SDK

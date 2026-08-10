@@ -73,8 +73,13 @@ $warm = chan();
 unary($warm, 'warmup');
 
 // ── Cold: channel construct + first unary ──
-scenario('cold_channel_unary', min($REVS, 30), function () {
-    $ch = chan();
+// Unique per-rev channel arg defeats BOTH implementations' persistent channel
+// registries: this must measure real transport establishment.
+$cold_i = 0;
+scenario('cold_channel_unary', min($REVS, 30), function () use (&$cold_i) {
+    global $TARGET;
+    $ch = new Grpc\Channel($TARGET, ['credentials' => Grpc\ChannelCredentials::createInsecure(),
+        'grpc.bench_nonce' => 'cold-' . (++$cold_i)]);
     unary($ch, 'hi');
     $ch->close();
 });

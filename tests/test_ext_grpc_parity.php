@@ -52,10 +52,11 @@ function ledger(string $id, bool $fixed, string $expected, string $current, call
 
 // ═════════════════════════ Call / startBatch layer ═════════════════════════
 
-ledger('send-op-result-booleans', true, 'md=1 msg=1 close=1', 'md= msg= close=', function () {
+ledger('send-op-result-booleans', true, 'md=true msg=true close=true', 'md=NULL msg=NULL close=NULL', function () {
     $call = new Grpc\Call(chan(), ECHO_M, dl3());
     $r = $call->startBatch([Grpc\OP_SEND_INITIAL_METADATA=>[], Grpc\OP_SEND_MESSAGE=>['message'=>ep('hi')], Grpc\OP_SEND_CLOSE_FROM_CLIENT=>true]);
-    $out = sprintf('md=%s msg=%s close=%s', ($r->send_metadata ?? ''), ($r->send_message ?? ''), ($r->send_close ?? ''));
+    $out = sprintf('md=%s msg=%s close=%s', var_export($r->send_metadata ?? null, true),
+        var_export($r->send_message ?? null, true), var_export($r->send_close ?? null, true));
     $call->startBatch([Grpc\OP_RECV_INITIAL_METADATA=>true, Grpc\OP_RECV_MESSAGE=>true, Grpc\OP_RECV_STATUS_ON_CLIENT=>true]);
     return $out;
 });
@@ -78,11 +79,14 @@ ledger('recv-after-done-errors', true, 'LogicException', 'code=0', function () {
     });
 });
 
-ledger('initial-md-transport-headers-stripped', true, 'ct=0 gs=0', 'ct=1 gs=1', function () {
+ledger('initial-md-transport-headers-stripped', true, 'ct=0 gs=0 bin=1', 'ct=1 gs=1 bin=1', function () {
     $call = new Grpc\Call(chan(), ECHO_M, dl3());
     $r = $call->startBatch(fullBatch());
     $md = (array)$r->metadata;
-    return sprintf('ct=%d gs=%d', (int)array_key_exists('content-type', $md), (int)array_key_exists('grpc-status', $md));
+    // bin=1 is the positive control: if metadata surfacing broke entirely,
+    // ct=0 gs=0 would pass vacuously without it.
+    return sprintf('ct=%d gs=%d bin=%d', (int)array_key_exists('content-type', $md),
+        (int)array_key_exists('grpc-status', $md), (int)array_key_exists('x-test-binary-bin', $md));
 });
 
 ledger('unknown-op-rejected', true, 'InvalidArgumentException', 'accepted', function () {
@@ -178,7 +182,13 @@ ledger('status-property-order', true, 'metadata,code,details', 'code,details,met
 // ══════════════════ Channel / Credentials / Timeval layer ══════════════════
 
 ledger('connectivity-state-transitions', true, 'state=2', 'state=0', function () {
-    $ch = chan();
+    global $TARGET;
+    // Unique channel arg => fresh persistent-registry entry: the case must
+    // prove try_to_connect drives IDLE->READY itself, not inherit READY from
+    // the shared channel earlier cases already used for RPCs.
+    $ch = new Grpc\Channel($TARGET, ['credentials' => Grpc\ChannelCredentials::createInsecure(),
+        'grpc.probe_nonce' => uniqid('conn', true)]);
+    if ($ch->getConnectivityState() !== 0) return 'not-idle-at-start';
     $ch->getConnectivityState(true);
     usleep(500_000);
     return 'state=' . $ch->getConnectivityState();
@@ -190,7 +200,7 @@ ledger('watch-connectivity-honors-deadline', true, 'deadline-false', 'immediate-
     $t0 = microtime(true);
     $r = $ch->watchConnectivityState($cur, Grpc\Timeval::now()->add(new Grpc\Timeval(300_000)));
     $elapsed = microtime(true) - $t0;
-    if (!$r && $elapsed >= 0.25) return 'deadline-false';
+    if (!$r && $elapsed >= 0.25 && $elapsed < 1.0) return 'deadline-false';
     if ($r && $elapsed < 0.05) return 'immediate-true';
     return sprintf('other(r=%s,%.2fs)', var_export($r, true), $elapsed);
 });
@@ -204,8 +214,14 @@ ledger('invalid-credentials-rejected', true, 'InvalidArgumentException', 'constr
 });
 
 ledger('persistent-channel-shared', true, 'a=2 b=2', 'a=0 b=0', function () {
-    $a = chan();
-    $b = chan();
+    global $TARGET;
+    // Same fresh key for both objects: b must observe a's connect attempt,
+    // not pre-warmed state from earlier cases.
+    $nonce = uniqid('shared', true);
+    $args = ['credentials' => Grpc\ChannelCredentials::createInsecure(), 'grpc.probe_nonce' => $nonce];
+    $a = new Grpc\Channel($TARGET, $args);
+    $b = new Grpc\Channel($TARGET, $args);
+    if ($b->getConnectivityState() !== 0) return 'not-idle-at-start';
     $a->getConnectivityState(true);
     usleep(400_000);
     return sprintf('a=%d b=%d', $a->getConnectivityState(), $b->getConnectivityState());
@@ -219,11 +235,12 @@ ledger('channel-args-bool-rejected', true, 'InvalidArgumentException', 'accepted
     });
 });
 
-ledger('call-error-constants', true, 'if=9 tmo=1 aa=0', 'if=8 tmo=0 aa=1', function () {
-    return sprintf('if=%s tmo=%d aa=%d',
-        defined('Grpc\CALL_ERROR_INVALID_FLAGS') ? Grpc\CALL_ERROR_INVALID_FLAGS : '-',
-        (int)defined('Grpc\CALL_ERROR_TOO_MANY_OPERATIONS'),
-        (int)defined('Grpc\CALL_ERROR_ALREADY_ACCEPTED'));
+ledger('call-error-constants', true, 'if=9 tmo=8 aa=-', 'if=8 tmo=- aa=4', function () {
+    $v = fn(string $c) => defined($c) ? (string)constant($c) : '-';
+    return sprintf('if=%s tmo=%s aa=%s',
+        $v('Grpc\CALL_ERROR_INVALID_FLAGS'),
+        $v('Grpc\CALL_ERROR_TOO_MANY_OPERATIONS'),
+        $v('Grpc\CALL_ERROR_ALREADY_ACCEPTED'));
 });
 
 ledger('closed-channel-exception-class', true, 'RuntimeException', 'Exception', function () {
@@ -287,7 +304,11 @@ ledger('timeval-methods-no-return-types', true, 'false', 'true', function () {
 // "key:hex,hex" lines) and the TLS listener on :50052 (CA: tests/server/tls).
 
 $TLS_TARGET = str_replace('50051', '50052', $TARGET);
-$CA_PEM = file_get_contents(__DIR__ . '/server/tls/ca.crt') ?: '';
+$CA_PEM = file_get_contents(__DIR__ . '/server/tls/ca.crt');
+if ($CA_PEM === false || $CA_PEM === '') {
+    fwrite(STDERR, "FATAL: tests/server/tls/ca.crt missing — TLS ledger cases cannot run\n");
+    exit(1);
+}
 
 function decode_body(?string $w): string {
     if ($w === null || $w === '') return '';
@@ -374,16 +395,22 @@ ledger('callcreds-composite-both-plugins', false, 'x-p1:6f6e65 | x-p2:74776f', '
     return md_echo(tls_chan(), [], ['x-p'], Grpc\CallCredentials::createComposite($cc1, $cc2));
 });
 
-ledger('callcreds-plugin-bad-return-fails', false, 'code=14', 'code=0', function () {
-    $bad = Grpc\CallCredentials::createFromPlugin(fn($c) => 'not an array');
-    $call = new Grpc\Call(tls_chan(), '/grpc.testing.TestService/Echo', dl3());
-    $call->setCredentials($bad);
-    $r = $call->startBatch([
-        Grpc\OP_SEND_INITIAL_METADATA => [], Grpc\OP_SEND_MESSAGE => ['message' => ep('x')],
-        Grpc\OP_SEND_CLOSE_FROM_CLIENT => true, Grpc\OP_RECV_INITIAL_METADATA => true,
-        Grpc\OP_RECV_MESSAGE => true, Grpc\OP_RECV_STATUS_ON_CLIENT => true,
-    ]);
-    return 'code=' . $r->status->code;
+ledger('callcreds-plugin-bad-return-fails', false, 'ctl=0 bad=14', 'ctl=0 bad=0', function () {
+    // Control first: a GOOD plugin must succeed on the same TLS channel, so
+    // "bad=14" can never be satisfied by the TLS harness simply being down.
+    $run = function (Grpc\CallCredentials $cc): int {
+        $call = new Grpc\Call(tls_chan(), '/grpc.testing.TestService/Echo', dl3());
+        $call->setCredentials($cc);
+        $r = $call->startBatch([
+            Grpc\OP_SEND_INITIAL_METADATA => [], Grpc\OP_SEND_MESSAGE => ['message' => ep('x')],
+            Grpc\OP_SEND_CLOSE_FROM_CLIENT => true, Grpc\OP_RECV_INITIAL_METADATA => true,
+            Grpc\OP_RECV_MESSAGE => true, Grpc\OP_RECV_STATUS_ON_CLIENT => true,
+        ]);
+        return $r->status->code;
+    };
+    $ctl = $run(Grpc\CallCredentials::createFromPlugin(fn($c) => []));
+    $bad = $run(Grpc\CallCredentials::createFromPlugin(fn($c) => 'not an array'));
+    return sprintf('ctl=%d bad=%d', $ctl, $bad);
 });
 
 // Intentional divergence: setDefaultRootsPem set BEFORE createSsl() works
@@ -392,6 +419,8 @@ ledger('callcreds-plugin-bad-return-fails', false, 'code=14', 'code=0', function
 ledger('roots-pem-late-creds-work', true, 'code=0', 'code=0', function () {
     global $CA_PEM;
     Grpc\ChannelCredentials::setDefaultRootsPem($CA_PEM);
+    // NOTE: default-roots state is process-global; reset at the end so later
+    // TLS cases can't inherit the test CA and pass for the wrong reason.
     $late = Grpc\ChannelCredentials::createSsl();
     global $TLS_TARGET;
     $ch = new Grpc\Channel($TLS_TARGET, ['credentials' => $late]);
@@ -506,16 +535,13 @@ ledger('string-batch-key-invalid-argument', false, 'InvalidArgumentException(1)'
     catch (Throwable $e) { return get_class($e) . '(' . $e->getCode() . ')'; }
 });
 
-// Weak mode is what real client libraries use; the earlier coercion cases were
-// measured under declare(strict_types=1), where ext-grpc also rejects.
-ledger('weak-mode-coercion', false, 'int=ok null=ok str=ok', 'int=throw null=throw str=throw', function () {
-    $ch = chan();
-    $f = function (callable $c) { try { $c(); return 'ok'; } catch (Throwable $e) { return 'throw'; } };
-    return sprintf('int=%s null=%s str=%s',
-        $f(fn() => $ch->getConnectivityState(1)),
-        $f(fn() => @$ch->getConnectivityState(null)),
-        $f(fn() => new Grpc\Timeval('1000000')));
-});
+// Weak mode is what real client libraries use. The probes live in a separate
+// non-strict file: strict_types here would apply to the closures' call sites
+// and measure the wrong mode entirely.
+require __DIR__ . '/parity_weak_probes.php';
+ledger('weak-mode-coercion', false, 'int=ok null=ok str=ok',
+    'int=throw:InvalidArgumentException null=throw:InvalidArgumentException str=throw:InvalidArgumentException',
+    fn() => weak_mode_probes(chan()));
 
 // ═══════════════════════════════ Runner ════════════════════════════════════
 

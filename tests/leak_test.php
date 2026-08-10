@@ -24,6 +24,7 @@
 echo "=== grpc-php-rs Memory Leak Test (local server) ===\n\n";
 
 $baseline = memory_get_usage();
+$GLOBALS['rss_start'] = rss_kb();
 echo "Baseline memory: " . format_bytes($baseline) . "\n";
 
 // ── Helpers ──
@@ -50,6 +51,18 @@ function encode_varint(int $value): string {
  * Make a unary gRPC call using the low-level Grpc\Call + startBatch API.
  * Returns [response_bytes|null, status_code, status_details].
  */
+$GLOBALS['rpc_ok'] = 0;
+$GLOBALS['rpc_bad'] = 0;
+
+function rss_kb(): int {
+    // Linux container: VmRSS from /proc; macOS local runs: ru_maxrss (bytes)
+    $status = @file_get_contents('/proc/self/status');
+    if ($status !== false && preg_match('/VmRSS:\s+(\d+) kB/', $status, $m)) {
+        return (int)$m[1];
+    }
+    return intdiv(getrusage()['ru_maxrss'] ?? 0, 1024);
+}
+
 function grpc_call(
     Grpc\Channel $channel,
     string $method,
@@ -82,6 +95,14 @@ function grpc_call(
     $details = $status->details ?? '';
     $message = $result->message ?? null;
 
+    // Every RPC in this file must actually execute its path: a leak test
+    // whose calls all fail instantly exercises nothing (and churns less
+    // memory, passing MORE comfortably).
+    if ($code === 0 || $code === 13 /* ErrorResponse path */) {
+        $GLOBALS['rpc_ok']++;
+    } else {
+        $GLOBALS['rpc_bad']++;
+    }
     return [$message, $code, $details];
 }
 

@@ -138,7 +138,11 @@ try {
     $e = wait_unary($call);
     check('cancelled call is not OK', ($e->status->code ?? -1) !== 0, 'code=' . ($e->status->code ?? -1));
 } catch (Throwable $t) {
-    check('cancelled call is not OK', true);
+    // Divergence from ext-grpc (which returns status code 1) is tracked in
+    // the parity ledger; here require the failure to actually be the cancel,
+    // not an arbitrary Throwable.
+    check('cancelled call is not OK', stripos($t->getMessage(), 'cancel') !== false,
+        get_class($t) . ': ' . $t->getMessage());
 }
 
 // -----------------------------------------------------------------------------

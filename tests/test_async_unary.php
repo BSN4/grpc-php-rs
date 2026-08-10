@@ -89,10 +89,11 @@ $elapsed_ms = (hrtime(true) - $t0) / 1e6;
 
 check("all {$n} calls OK", $ok === $n, "ok={$ok}");
 check("all {$n} responses echoed intact", $bodies_ok === $n, "bodies_ok={$bodies_ok}");
-// Serial execution would take >= n*200ms = 2000ms. Concurrent ~200-400ms.
+// Serial is >= n*200ms = 2000ms; a window-of-2 partial regression ~1000ms.
+    // 700ms rejects both while leaving 3x headroom over the ~205ms nominal.
 check(
     sprintf("calls ran concurrently (%.0fms for %d x 200ms delay)", $elapsed_ms, $n),
-    $elapsed_ms < 1200,
+    $elapsed_ms < 700,
     sprintf("took %.0fms, serial would be %dms", $elapsed_ms, $n * 200)
 );
 

@@ -29,7 +29,15 @@ $deadline = time() + 60;
 $doc = $fs->collection('parity')->document('probe');
 while (time() < $deadline) {
     try { $doc->snapshot(); $ready = true; break; }
-    catch (Throwable $e) { usleep(500_000); }
+    catch (Throwable $e) {
+        // Retry connection-shaped errors only; anything else is a real bug and must fail now
+        $m = $e->getMessage();
+        if (stripos($m, 'unavailable') === false && stripos($m, 'connect') === false
+            && stripos($m, 'refused') === false && stripos($m, 'deadline') === false) {
+            throw $e;
+        }
+        usleep(500_000);
+    }
 }
 check('emulator reachable', $ready);
 if (!$ready) { echo "\n=== {$passed}/{$tests} ===\n"; exit(1); }

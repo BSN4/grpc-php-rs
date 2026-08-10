@@ -23,13 +23,14 @@ usage() {
 Usage: ./test.sh [command]
 
 Commands:
-  all         Build + run smoke + compat tests (default)
+  all         Build + run all core suites (default; excludes zts/parity/bench/integration)
   smoke       Run PHP smoke test (API surface, no network)
   compat      Run grpc/grpc library compatibility test (Issue #4)
   grpc-gcp    Run google/grpc-gcp channel pool compatibility test
   firestore   Run Firestore client compatibility test
   leak        Run memory leak test with local gRPC test server
   streaming   Run server streaming test with local gRPC test server
+  trailer     Run binary trailing metadata test with local gRPC test server
   unary       Run split-batch unary test with local gRPC test server
   promises    Run gax-style promise concurrency test (grpc/grpc + guzzle)
   ledger      Run ext-grpc parity ledger (known divergences, strict-xfail)
@@ -108,6 +109,13 @@ cmd_streaming() {
     ok "Server streaming test passed"
 }
 
+cmd_trailer() {
+    build_target test-binary-trailer
+    info "Running binary trailing metadata test"
+    run_target test-binary-trailer
+    ok "Binary trailer test passed"
+}
+
 cmd_unary() {
     build_target test-unary
     info "Running split-batch unary test"
@@ -150,10 +158,12 @@ def parse(text):
             out[parts[0]] = (float(parts[1]), float(parts[2]))
     return out
 ours, ext = parse(sys.argv[1]), parse(sys.argv[2])
+if not ours or set(ours) != set(ext):
+    missing = set(ours) ^ set(ext)
+    print(f"benchmark incomplete: scenario mismatch {sorted(missing) or '(both empty)'}")
+    sys.exit(1)
 print(f"{'scenario':<24}{'grpc-php-rs':>14}{'ext-grpc':>14}{'ratio':>8}")
 for name in ours:
-    if name not in ext:
-        continue
     o, e = ours[name][0], ext[name][0]
     flag = '  <-- slower' if o > e * 1.15 else ''
     print(f"{name:<24}{o:>12.1f}µs{e:>12.1f}µs{o/e:>8.2f}{flag}")
@@ -183,11 +193,10 @@ cmd_parity() {
 cmd_zts() {
     build_target test-zts
 
-    info "Starting FrankenPHP with 4 workers"
+    info "Starting FrankenPHP (ZTS, threaded classic mode)"
     docker rm -f "$CONTAINER" 2>/dev/null || true
     docker run -d --name "$CONTAINER" \
         -p 8099:8080 \
-        -e FRANKENPHP_WORKERS="/app/tests/test_zts_stress.php=4" \
         "${IMAGE}:test-zts"
 
     info "Waiting for FrankenPHP to start"
@@ -204,19 +213,44 @@ cmd_zts() {
     done
 
     info "Verifying extension loaded in ZTS container"
-    docker exec "$CONTAINER" php -r "echo 'grpc loaded: ' . (extension_loaded('grpc') ? 'yes' : 'no') . PHP_EOL;"
+    docker exec "$CONTAINER" php -r "exit(extension_loaded('grpc') ? 0 : 1);" || {
+        fail "grpc extension not loaded in ZTS container"
+        docker rm -f "$CONTAINER" 2>/dev/null || true
+        exit 1
+    }
 
     info "Running smoke test inside ZTS container"
     docker exec "$CONTAINER" php /app/tests/test_smoke.php
 
     info "Concurrent stress test (200 requests, 10 concurrent)"
+    local stress_out
+    stress_out=$(mktemp -d)
+    local curl_failed=0
     for i in $(seq 1 10); do
+        local pids=()
         for j in $(seq 1 20); do
-            curl -sf http://localhost:8099/test_zts_stress.php > /dev/null &
+            curl -sf http://localhost:8099/test_zts_stress.php > "$stress_out/$i.$j" &
+            pids+=($!)
         done
-        wait
+        local p
+        for p in "${pids[@]}"; do
+            wait "$p" || curl_failed=$((curl_failed + 1))
+        done
         echo "--- Batch $i/10 complete ---"
     done
+    local bad_bodies
+    # grep -L exits 1 when every file matches (the GOOD case) — guard it or
+    # set -e kills the script precisely when all 200 requests succeeded.
+    bad_bodies=$( (grep -L '^OK' "$stress_out"/*.* 2>/dev/null || true) | wc -l | tr -d ' ')
+    if [ "$curl_failed" -ne 0 ] || [ "$bad_bodies" -ne 0 ]; then
+        fail "Stress requests failed: $curl_failed curl errors, $bad_bodies non-OK bodies"
+        (grep -L '^OK' "$stress_out"/*.* 2>/dev/null || true) | head -3 | xargs -I{} sh -c 'echo "--- {}"; cat {}'
+        docker rm -f "$CONTAINER" 2>/dev/null || true
+        rm -rf "$stress_out"
+        exit 1
+    fi
+    ok "All 200 requests returned OK bodies"
+    rm -rf "$stress_out"
 
     echo ""
     info "Checking container still alive"
@@ -313,6 +347,10 @@ cmd_all() {
     echo ""
     cmd_streaming
     echo ""
+    cmd_trailer
+    echo ""
+    cmd_firestore
+    echo ""
     cmd_unary
     echo ""
     cmd_promises
@@ -321,7 +359,7 @@ cmd_all() {
     echo ""
     cmd_leak
     echo ""
-    ok "All tests passed"
+    ok "Core suites passed (zts/parity/bench/integration/ecosystem run separately)"
 }
 
 # --- Main ---
@@ -336,6 +374,7 @@ case "$command" in
     firestore)   cmd_firestore ;;
     leak)        cmd_leak ;;
     streaming)   cmd_streaming ;;
+    trailer)     cmd_trailer ;;
     unary)       cmd_unary ;;
     promises)    cmd_promises ;;
     ledger)      cmd_ledger ;;

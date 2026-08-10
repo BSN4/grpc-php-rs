@@ -31,6 +31,8 @@ try {
 
 } catch (\Throwable $e) {
     $elapsed = (hrtime(true) - $start) / 1_000_000;
-    echo "FAIL id={$id} error={$e->getMessage()} elapsed={$elapsed}ms\n";
+    // Status code MUST precede any output — headers are already sent after
+    // the first echo, and the 500 would silently become a 200.
     http_response_code(500);
+    echo "FAIL id={$id} error={$e->getMessage()} elapsed={$elapsed}ms\n";
 }

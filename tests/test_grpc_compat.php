@@ -34,7 +34,7 @@ echo "=== grpc/grpc Compatibility Tests ===\n\n";
 // This tests that the class can extend Grpc\Channel without fatal errors
 test('InterceptorChannel class loads', function () {
     $rc = new ReflectionClass('Grpc\Internal\InterceptorChannel');
-    assert($rc->isSubclassOf('Grpc\Channel'), 'InterceptorChannel must extend Grpc\Channel');
+    if (!$rc->isSubclassOf('Grpc\Channel')) throw new RuntimeException('InterceptorChannel must extend Grpc\Channel');
 });
 
 // Test 2: InterceptorChannel::getTarget() override is compatible
@@ -46,7 +46,7 @@ test('InterceptorChannel::getTarget() override', function () {
     $interceptor = new class extends \Grpc\Interceptor {};
     $ic = new \Grpc\Internal\InterceptorChannel($channel, $interceptor);
     $target = $ic->getTarget();
-    assert(is_string($target), 'getTarget() should return a string');
+    if (!(is_string($target))) throw new RuntimeException('getTarget() should return a string');
     $channel->close();
 });
 
@@ -58,7 +58,7 @@ test('InterceptorChannel::getConnectivityState() override', function () {
     $interceptor = new class extends \Grpc\Interceptor {};
     $ic = new \Grpc\Internal\InterceptorChannel($channel, $interceptor);
     $state = $ic->getConnectivityState();
-    assert(is_int($state), 'getConnectivityState() should return an int');
+    if (!(is_int($state))) throw new RuntimeException('getConnectivityState() should return an int');
     $channel->close();
 });
 
@@ -80,12 +80,15 @@ test('BaseStub with InterceptorChannel', function () {
     $interceptor = new class extends \Grpc\Interceptor {};
     $ic = new \Grpc\Internal\InterceptorChannel($channel, $interceptor);
 
-    // BaseStub accepts Channel or InterceptorChannel
+    // The stub must be constructed OVER the InterceptorChannel — that's the
+    // interaction issue #4 broke; constructing it standalone tests nothing.
     $stub = new class('localhost:50051', [
         'credentials' => \Grpc\ChannelCredentials::createInsecure(),
-    ]) extends \Grpc\BaseStub {
+    ], $ic) extends \Grpc\BaseStub {
     };
-    assert($stub->getTarget() !== '', 'BaseStub::getTarget() should work');
+    if (!is_string($stub->getTarget()) || $stub->getTarget() === '') {
+        throw new RuntimeException('BaseStub-over-InterceptorChannel getTarget() should work');
+    }
     $channel->close();
 });
 

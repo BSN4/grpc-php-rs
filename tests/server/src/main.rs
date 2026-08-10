@@ -242,24 +242,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         include_str!("../tls/server.key"),
     );
 
-    let tls = tokio::spawn(
-        Server::builder()
-            .tls_config(tonic::transport::ServerTlsConfig::new().identity(identity))?
-            .layer(tower::util::MapRequestLayer::new(inject_authority))
-            .add_service(TestServiceServer::new(TestServiceImpl::default()))
-            .serve(tls_addr),
-    );
+    // Join the serve futures DIRECTLY (not via spawn handles): a spawned
+    // handle resolves Ok(Err(..)) on listener failure, which try_join!
+    // treats as success — the process would keep running with TLS silently
+    // dead. Joined directly, the first listener error kills the process.
+    let tls_srv = Server::builder()
+        .tls_config(tonic::transport::ServerTlsConfig::new().identity(identity))?
+        .layer(tower::util::MapRequestLayer::new(inject_authority))
+        .add_service(TestServiceServer::new(TestServiceImpl::default()))
+        .serve(tls_addr);
 
-    let plain = tokio::spawn(
-        Server::builder()
-            .layer(tower::util::MapRequestLayer::new(inject_authority))
-            .add_service(TestServiceServer::new(TestServiceImpl::default()))
-            .serve(plain_addr),
-    );
+    let plain_srv = Server::builder()
+        .layer(tower::util::MapRequestLayer::new(inject_authority))
+        .add_service(TestServiceServer::new(TestServiceImpl::default()))
+        .serve(plain_addr);
 
-    let (p, t) = tokio::try_join!(plain, tls)?;
-    p?;
-    t?;
+    tokio::try_join!(plain_srv, tls_srv)?;
 
     Ok(())
 }

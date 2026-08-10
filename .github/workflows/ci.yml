@@ -28,5 +28,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - name: Build and smoke test
+      - name: Build and run core suites
         run: ./test.sh all
+
+  zts-stress:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: ZTS stress test (FrankenPHP, 200 concurrent gRPC+TLS requests)
+        run: ./test.sh zts

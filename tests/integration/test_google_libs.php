@@ -46,7 +46,7 @@ foreach (range(40, 15) as $v) {
     if (class_exists($cls)) {
         $adsVersion = "V{$v}";
         try {
-            $adsClient = new $cls(['credentials' => $keyfile]);
+            $adsClient = new $cls(['credentials' => $keyfile, 'transport' => 'grpc']);
         } catch (Throwable $e) {
             check("ads {$adsVersion} client constructs", false, get_class($e) . ': ' . $e->getMessage());
         }
