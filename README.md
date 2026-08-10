@@ -7,6 +7,9 @@
 
 A Rust-based gRPC extension for PHP — **drop-in replacement** for the official `ext-grpc`.
 
+> [!IMPORTANT]
+> **Please consider supporting this work.** If your company runs on `grpc-php-rs`, [sponsoring the project](https://github.com/sponsors/BSN4) directly funds its maintenance, compatibility testing, and long-term production support.
+
 ## Why?
 
 The official C-based `grpc` extension has long-standing issues:
@@ -93,6 +96,15 @@ $channel = new \Grpc\Channel('localhost:50051', [
 ```
 
 All existing gRPC PHP code works unchanged — `Grpc\Channel`, `Grpc\ChannelCredentials`, `Grpc\CallCredentials`, `Grpc\Timeval`, and all call types (`UnaryCall`, `ServerStreamingCall`, `ClientStreamingCall`, `BidiStreamingCall`).
+
+## Compatibility & Performance
+
+Compatibility with `ext-grpc` is tracked case by case in a machine-checked
+parity ledger (`./test.sh ledger`), and the major consumers — google-cloud-php
+(Pub/Sub, Spanner, Firestore, Bigtable, Datastore against official emulators),
+google-ads-php, Temporal, OpenTelemetry, etcd — run as test suites
+(`./test.sh ecosystem`). Benchmarks against `ext-grpc` are in
+[BENCHMARK.md](BENCHMARK.md) — reproduce them with `./test.sh bench`.
 
 ## Building from Source
 
