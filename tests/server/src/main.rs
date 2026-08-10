@@ -55,6 +55,43 @@ impl TestService for TestServiceImpl {
         Ok(Response::new(request.into_inner()))
     }
 
+    /// Echo the request metadata (and :authority, injected by the transport
+    /// layer as x-seen-authority) into the response body, one sorted line per
+    /// key: "key:hex(v1),hex(v2)". Lets clients verify what actually reached
+    /// the wire — send-metadata parity, multi-values, -bin keys, authority.
+    async fn echo_metadata(&self, request: Request<Payload>) -> Result<Response<Payload>, Status> {
+        use std::collections::BTreeMap;
+        use tonic::metadata::KeyAndValueRef;
+
+        let mut by_key: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for kv in request.metadata().iter() {
+            match kv {
+                KeyAndValueRef::Ascii(k, v) => {
+                    by_key
+                        .entry(k.as_str().to_string())
+                        .or_default()
+                        .push(hex(v.as_encoded_bytes()));
+                }
+                KeyAndValueRef::Binary(k, v) => {
+                    let decoded = v.to_bytes().map_err(|e| {
+                        Status::internal(format!("bad binary metadata: {e}"))
+                    })?;
+                    by_key
+                        .entry(k.as_str().to_string())
+                        .or_default()
+                        .push(hex(&decoded));
+                }
+            }
+        }
+
+        let body: String = by_key
+            .iter()
+            .map(|(k, vs)| format!("{k}:{}\n", vs.join(",")))
+            .collect();
+
+        Ok(Response::new(Payload { body: body.into() }))
+    }
+
     async fn large_response(
         &self,
         _request: Request<Payload>,
@@ -174,15 +211,55 @@ impl TestService for TestServiceImpl {
     }
 }
 
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Copy the request :authority into an x-seen-authority header before tonic
+/// strips the URI, so EchoMetadata can surface it to clients.
+fn inject_authority<B>(mut req: http::Request<B>) -> http::Request<B> {
+    let authority = req
+        .uri()
+        .authority()
+        .map(|a| a.to_string())
+        .unwrap_or_default();
+    if let Ok(value) = http::HeaderValue::from_str(&authority) {
+        req.headers_mut().insert("x-seen-authority", value);
+    }
+    req
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "0.0.0.0:50051".parse()?;
-    eprintln!("TestServer listening on {addr}");
+    let plain_addr = "0.0.0.0:50051".parse()?;
+    let tls_addr: std::net::SocketAddr = "0.0.0.0:50052".parse()?;
+    eprintln!("TestServer listening on {plain_addr} (plaintext) and {tls_addr} (TLS)");
 
-    Server::builder()
-        .add_service(TestServiceServer::new(TestServiceImpl::default()))
-        .serve(addr)
-        .await?;
+    // Long-lived self-signed test PKI, baked in at compile time
+    // (tests/server/tls/, CA at tests/server/tls/ca.crt for clients).
+    let identity = tonic::transport::Identity::from_pem(
+        include_str!("../tls/server.crt"),
+        include_str!("../tls/server.key"),
+    );
+
+    let tls = tokio::spawn(
+        Server::builder()
+            .tls_config(tonic::transport::ServerTlsConfig::new().identity(identity))?
+            .layer(tower::util::MapRequestLayer::new(inject_authority))
+            .add_service(TestServiceServer::new(TestServiceImpl::default()))
+            .serve(tls_addr),
+    );
+
+    let plain = tokio::spawn(
+        Server::builder()
+            .layer(tower::util::MapRequestLayer::new(inject_authority))
+            .add_service(TestServiceServer::new(TestServiceImpl::default()))
+            .serve(plain_addr),
+    );
+
+    let (p, t) = tokio::try_join!(plain, tls)?;
+    p?;
+    t?;
 
     Ok(())
 }

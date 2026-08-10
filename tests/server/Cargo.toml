@@ -5,12 +5,14 @@ edition = "2021"
 publish = false
 
 [dependencies]
-tonic = "0.14"
+tonic = { version = "0.14", features = ["tls-ring"] }
 tonic-prost = "0.14"
 prost = "0.14"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tokio-stream = "0.1"
 bytes = "1"
+http = "1"
+tower = { version = "0.5", features = ["util"] }
 
 [build-dependencies]
 tonic-build = "0.14"

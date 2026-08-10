@@ -22,6 +22,16 @@ pub enum CredentialsInner {
 #[php(name = "Grpc\\ChannelCredentials")]
 pub struct GrpcChannelCredentials {
     pub(crate) inner: CredentialsInner,
+    /// Distinguishes credential objects in the persistent-channel key —
+    /// channels built from different credentials must never share a
+    /// transport (C-core keys on a credentials hash).
+    pub(crate) id: u64,
+}
+
+/// Monotonic id source for [`GrpcChannelCredentials::id`].
+pub(crate) fn next_credentials_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 #[php_impl]
@@ -57,6 +67,7 @@ impl GrpcChannelCredentials {
 
         Ok(Self {
             inner: CredentialsInner::Ssl { tls_config: tls },
+            id: next_credentials_id(),
         })
     }
 
@@ -81,6 +92,7 @@ impl GrpcChannelCredentials {
         };
 
         Ok(Self {
+            id: next_credentials_id(),
             inner: CredentialsInner::Composite {
                 tls_config,
                 call_plugin: Arc::clone(&call_creds.plugin),
@@ -102,6 +114,7 @@ impl GrpcChannelCredentials {
 
         Self {
             inner: CredentialsInner::Ssl { tls_config: tls },
+            id: next_credentials_id(),
         }
     }
 

@@ -58,6 +58,7 @@ impl GrpcChannel {
     pub fn __construct(target: String, args: &ZendHashTable) -> PhpResult<Self> {
         let mut tls_config = None;
         let mut call_plugin = None;
+        let mut creds_id: u64 = 0; // 0 = insecure
 
         // Validate channel args like ext-grpc: string keys, int/string values.
         // 'credentials' and 'force_new' are extracted before validation there.
@@ -103,6 +104,7 @@ impl GrpcChannel {
                         "credentials must be a ChannelCredentials object",
                     )
                 })?;
+                creds_id = creds.id;
                 match &creds.inner {
                     CredentialsInner::Ssl {
                         tls_config: tls_cfg,
@@ -138,8 +140,7 @@ impl GrpcChannel {
         // channels are never shared.
         let persist_key = if call_plugin.is_none() && !force_new {
             Some(format!(
-                "{target}|tls={}|{}",
-                tls_config.is_some(),
+                "{target}|creds={creds_id}|{}",
                 persist_parts.join(",")
             ))
         } else {

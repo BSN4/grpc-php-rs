@@ -282,6 +282,128 @@ ledger('timeval-methods-no-return-types', true, 'false', 'true', function () {
     return var_export((new ReflectionMethod('Grpc\Timeval', 'add'))->hasReturnType(), true);
 });
 
+// ═════════════ Wire-level cases (metadata-echo + TLS harness) ══════════════
+// Proven 2026-08-12 via EchoMetadata (echoes request metadata + :authority as
+// "key:hex,hex" lines) and the TLS listener on :50052 (CA: tests/server/tls).
+
+$TLS_TARGET = str_replace('50051', '50052', $TARGET);
+$CA_PEM = file_get_contents(__DIR__ . '/server/tls/ca.crt') ?: '';
+
+function decode_body(?string $w): string {
+    if ($w === null || $w === '') return '';
+    $len = 0; $shift = 0; $i = 1;
+    while (true) { $b = ord($w[$i]); $len |= ($b & 0x7f) << $shift; $i++; if (!($b & 0x80)) break; $shift += 7; }
+    return substr($w, $i, $len);
+}
+
+/** Run EchoMetadata with $md; return "key:hex" lines for the given prefixes. */
+function md_echo(Grpc\Channel $ch, array $md, array $prefixes, ?Grpc\CallCredentials $cc = null): string {
+    $call = new Grpc\Call($ch, '/grpc.testing.TestService/EchoMetadata', dl3());
+    if ($cc !== null) $call->setCredentials($cc);
+    $r = $call->startBatch([
+        Grpc\OP_SEND_INITIAL_METADATA => $md, Grpc\OP_SEND_MESSAGE => ['message' => ep('x')],
+        Grpc\OP_SEND_CLOSE_FROM_CLIENT => true, Grpc\OP_RECV_INITIAL_METADATA => true,
+        Grpc\OP_RECV_MESSAGE => true, Grpc\OP_RECV_STATUS_ON_CLIENT => true,
+    ]);
+    if ($r->status->code !== 0) return "status={$r->status->code}";
+    $keep = array_filter(explode("\n", decode_body($r->message)),
+        fn($l) => array_any($prefixes, fn($p) => str_starts_with($l, $p)));
+    sort($keep);
+    return implode(' | ', $keep) ?: '(none)';
+}
+function tls_chan(): Grpc\Channel {
+    global $TLS_TARGET, $CA_PEM;
+    return new Grpc\Channel($TLS_TARGET, ['credentials' => Grpc\ChannelCredentials::createSsl($CA_PEM)]);
+}
+
+ledger('send-metadata-multi-value', false, 'x-multi:7631,7632', 'x-multi:7632', function () {
+    return md_echo(chan(), ['x-multi' => ['v1', 'v2']], ['x-multi']);
+});
+
+ledger('send-bin-metadata', false, 'x-probe-bin:00ff10', '(none)', function () {
+    return md_echo(chan(), ['x-probe-bin' => ["\x00\xff\x10"]], ['x-probe-bin']);
+});
+
+ledger('channel-default-authority', false, 'x-seen-authority:custom.example.com', 'x-seen-authority:(target)', function () {
+    global $TARGET;
+    $ch = new Grpc\Channel($TARGET, [
+        'credentials' => Grpc\ChannelCredentials::createInsecure(),
+        'grpc.default_authority' => 'custom.example.com',
+    ]);
+    $line = md_echo($ch, [], ['x-seen-authority']);
+    $auth = hex2bin(explode(':', $line, 2)[1] ?? '') ?: '?';
+    return 'x-seen-authority:' . ($auth === $TARGET ? '(target)' : $auth);
+});
+
+ledger('host-override-sets-authority', false, 'x-seen-authority:override.example.com', 'x-seen-authority:(target)', function () {
+    global $TARGET;
+    $ch = chan();
+    $call = new Grpc\Call($ch, '/grpc.testing.TestService/EchoMetadata', dl3(), 'override.example.com');
+    $r = $call->startBatch([
+        Grpc\OP_SEND_INITIAL_METADATA => [], Grpc\OP_SEND_MESSAGE => ['message' => ep('x')],
+        Grpc\OP_SEND_CLOSE_FROM_CLIENT => true, Grpc\OP_RECV_INITIAL_METADATA => true,
+        Grpc\OP_RECV_MESSAGE => true, Grpc\OP_RECV_STATUS_ON_CLIENT => true,
+    ]);
+    foreach (explode("\n", decode_body($r->message)) as $l) {
+        if (str_starts_with($l, 'x-seen-authority')) {
+            $auth = hex2bin(explode(':', $l, 2)[1]) ?: '?';
+            return 'x-seen-authority:' . ($auth === $TARGET ? '(target)' : $auth);
+        }
+    }
+    return '(none)';
+});
+
+ledger('callcreds-plugin-context-object', false, 'object;keys=service_url+method_name', 'string', function () {
+    $cc = Grpc\CallCredentials::createFromPlugin(function ($ctx) {
+        $desc = is_object($ctx)
+            ? 'object;keys=' . implode('+', array_keys((array)$ctx))
+            : gettype($ctx);
+        return ['x-parg' => [$desc]];
+    });
+    $line = md_echo(tls_chan(), [], ['x-parg'], $cc);
+    if (!str_starts_with($line, 'x-parg:')) return $line;
+    return (string)hex2bin(explode(',', explode(':', $line, 2)[1])[0]);
+});
+
+// ext-grpc 1.83's own composite is broken (observed: second plugin's metadata
+// sent twice, first dropped). The target here is the documented contract —
+// both plugins contribute — which neither implementation meets today.
+ledger('callcreds-composite-both-plugins', false, 'x-p1:6f6e65 | x-p2:74776f', 'x-p1:6f6e65', function () {
+    $cc1 = Grpc\CallCredentials::createFromPlugin(fn($c) => ['x-p1' => ['one']]);
+    $cc2 = Grpc\CallCredentials::createFromPlugin(fn($c) => ['x-p2' => ['two']]);
+    return md_echo(tls_chan(), [], ['x-p'], Grpc\CallCredentials::createComposite($cc1, $cc2));
+});
+
+ledger('callcreds-plugin-bad-return-fails', false, 'code=14', 'code=0', function () {
+    $bad = Grpc\CallCredentials::createFromPlugin(fn($c) => 'not an array');
+    $call = new Grpc\Call(tls_chan(), '/grpc.testing.TestService/Echo', dl3());
+    $call->setCredentials($bad);
+    $r = $call->startBatch([
+        Grpc\OP_SEND_INITIAL_METADATA => [], Grpc\OP_SEND_MESSAGE => ['message' => ep('x')],
+        Grpc\OP_SEND_CLOSE_FROM_CLIENT => true, Grpc\OP_RECV_INITIAL_METADATA => true,
+        Grpc\OP_RECV_MESSAGE => true, Grpc\OP_RECV_STATUS_ON_CLIENT => true,
+    ]);
+    return 'code=' . $r->status->code;
+});
+
+// Intentional divergence: setDefaultRootsPem set BEFORE createSsl() works
+// here (code=0); observed ext-grpc 1.83 fails the handshake (code=14) even in
+// this order. Our behavior is the one google-cloud's BaseStub relies on.
+ledger('roots-pem-late-creds-work', true, 'code=0', 'code=0', function () {
+    global $CA_PEM;
+    Grpc\ChannelCredentials::setDefaultRootsPem($CA_PEM);
+    $late = Grpc\ChannelCredentials::createSsl();
+    global $TLS_TARGET;
+    $ch = new Grpc\Channel($TLS_TARGET, ['credentials' => $late]);
+    $call = new Grpc\Call($ch, '/grpc.testing.TestService/Echo', dl3());
+    $r = $call->startBatch([
+        Grpc\OP_SEND_INITIAL_METADATA => [], Grpc\OP_SEND_MESSAGE => ['message' => ep('x')],
+        Grpc\OP_SEND_CLOSE_FROM_CLIENT => true, Grpc\OP_RECV_INITIAL_METADATA => true,
+        Grpc\OP_RECV_MESSAGE => true, Grpc\OP_RECV_STATUS_ON_CLIENT => true,
+    ]);
+    return 'code=' . $r->status->code;
+});
+
 // ═══════════════════════════════ Runner ════════════════════════════════════
 
 $pass = 0;
