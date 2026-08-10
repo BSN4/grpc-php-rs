@@ -145,14 +145,14 @@ ledger('ctor-closed-channel-exception-class', true, 'InvalidArgumentException', 
     return obs(function () use ($c) { new Grpc\Call($c, ECHO_M, dl3()); return 'accepted'; });
 });
 
-ledger('getpeer-transport-format', false, 'transport-peer', 'target-string', function () {
+ledger('getpeer-transport-format', true, 'transport-peer', 'target-string', function () {
     $call = new Grpc\Call(chan(), ECHO_M, dl3());
     $call->startBatch(fullBatch());
     $p = $call->getPeer();
     return (str_starts_with($p, 'ipv4:') || str_starts_with($p, 'ipv6:')) ? 'transport-peer' : 'target-string';
 });
 
-ledger('host-override-not-in-getpeer', false, 'peer', 'override-leaked', function () {
+ledger('host-override-not-in-getpeer', true, 'peer', 'override-leaked', function () {
     $call = new Grpc\Call(chan(), ECHO_M, dl3(), 'override.example.com');
     $call->startBatch(fullBatch());
     return $call->getPeer() === 'override.example.com' ? 'override-leaked' : 'peer';
@@ -177,14 +177,14 @@ ledger('status-property-order', true, 'metadata,code,details', 'code,details,met
 
 // ══════════════════ Channel / Credentials / Timeval layer ══════════════════
 
-ledger('connectivity-state-transitions', false, 'state=2', 'state=0', function () {
+ledger('connectivity-state-transitions', true, 'state=2', 'state=0', function () {
     $ch = chan();
     $ch->getConnectivityState(true);
     usleep(500_000);
     return 'state=' . $ch->getConnectivityState();
 });
 
-ledger('watch-connectivity-honors-deadline', false, 'deadline-false', 'immediate-true', function () {
+ledger('watch-connectivity-honors-deadline', true, 'deadline-false', 'immediate-true', function () {
     $ch = chan();
     $cur = $ch->getConnectivityState();
     $t0 = microtime(true);
@@ -203,7 +203,7 @@ ledger('invalid-credentials-rejected', true, 'InvalidArgumentException', 'constr
     });
 });
 
-ledger('persistent-channel-shared', false, 'a=2 b=2', 'a=0 b=0', function () {
+ledger('persistent-channel-shared', true, 'a=2 b=2', 'a=0 b=0', function () {
     $a = chan();
     $b = chan();
     $a->getConnectivityState(true);
@@ -258,7 +258,7 @@ ledger('server-class-exists', false, 'true', 'false', function () {
     return var_export(class_exists('Grpc\Server'), true);
 });
 
-ledger('fork-support-ini-registered', false, 'string', 'false', function () {
+ledger('fork-support-ini-registered', true, 'string', 'false', function () {
     $v = ini_get('grpc.enable_fork_support');
     return $v === false ? 'false' : 'string';
 });

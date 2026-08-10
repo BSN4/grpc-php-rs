@@ -138,9 +138,9 @@ impl GrpcTimeval {
         let remaining = self.usec.saturating_sub(now_usec);
         if remaining > 0 && self.usec != i64::MAX {
             let rt = crate::runtime::get_runtime().map_err(PhpException::from)?;
-            rt.block_on(tokio::time::sleep(std::time::Duration::from_micros(
-                remaining as u64,
-            )));
+            rt.block_on(async {
+                tokio::time::sleep(std::time::Duration::from_micros(remaining as u64)).await;
+            });
         }
         Ok(())
     }

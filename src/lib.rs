@@ -56,6 +56,25 @@ const EXT_GRPC_COMPAT_VERSION: &str = "1.82.0";
 
 fn register_constants(_ty: i32, mod_num: i32) -> i32 {
     use ext_php_rs::constant::IntoConst;
+    use ext_php_rs::flags::IniEntryPermission;
+    use ext_php_rs::zend::IniEntryDef;
+
+    // ini entries ext-grpc registers; deployment tooling probes for these
+    // via ini_get(). They are accepted but have no effect in this
+    // implementation (no C-core fork handling / pollers to configure).
+    IniEntryDef::register(
+        vec![
+            IniEntryDef::new(
+                "grpc.enable_fork_support".into(),
+                "0".into(),
+                &IniEntryPermission::System,
+            ),
+            IniEntryDef::new("grpc.poll_strategy".into(), String::new(), &IniEntryPermission::System),
+            IniEntryDef::new("grpc.grpc_verbosity".into(), String::new(), &IniEntryPermission::System),
+            IniEntryDef::new("grpc.grpc_trace".into(), String::new(), &IniEntryPermission::System),
+        ],
+        mod_num,
+    );
 
     macro_rules! reg {
         ($name:expr, $val:expr, $mod:expr) => {

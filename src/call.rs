@@ -99,7 +99,7 @@ fn array_key_to_long(key: &ArrayKey<'_>) -> Result<i64, GrpcError> {
 }
 
 /// Wall-clock microseconds since the Unix epoch.
-fn now_usec() -> i64 {
+pub(crate) fn now_usec() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0i64, |d| d.as_micros() as i64)
@@ -385,6 +385,7 @@ pub struct GrpcCall {
     method: String,
     target: String,
     deadline_usec: i64,
+    #[allow(dead_code)] // reserved for :authority override support
     host_override: Option<String>,
     call_plugin: Option<Arc<Mutex<Option<Zval>>>>,
     cancel_token: CancellationToken,
@@ -404,6 +405,10 @@ pub struct GrpcCall {
     /// Set when the originating PHP Grpc\Channel is closed; startBatch must
     /// then fail with RuntimeException like ext-grpc.
     channel_closed: Arc<std::sync::atomic::AtomicBool>,
+    /// Shared transport handle — call outcomes update the channel's
+    /// connectivity state (READY on responses, TRANSIENT_FAILURE on
+    /// connection errors).
+    channel_shared: Option<Arc<crate::channel::SharedChannel>>,
     /// Active streaming state (None for unary or not yet started).
     stream_state: Option<ActiveStream>,
 }
@@ -443,6 +448,7 @@ impl GrpcCall {
             initial_metadata_sent: false,
             finished: false,
             channel_closed: channel.get_closed_flag(),
+            channel_shared: channel.get_shared(),
             stream_state: None,
         })
     }
@@ -530,12 +536,25 @@ impl GrpcCall {
         Ok(result_obj)
     }
 
-    /// Returns the peer URI.
+    /// Returns the peer address in C-core's transport format
+    /// (ipv4:IP:port / ipv6:[..]:port). host_override never appears here.
     #[php(name = "getPeer")]
     pub fn get_peer(&self) -> String {
-        self.host_override
-            .clone()
-            .unwrap_or_else(|| self.target.clone())
+        let target = self.target.clone();
+        let Ok(rt) = get_runtime() else {
+            return target;
+        };
+        let resolved = rt.block_on(async {
+            tokio::net::lookup_host(target.as_str())
+                .await
+                .ok()
+                .and_then(|mut addrs| addrs.next())
+        });
+        match resolved {
+            Some(std::net::SocketAddr::V4(a)) => format!("ipv4:{a}"),
+            Some(std::net::SocketAddr::V6(a)) => format!("ipv6:{a}"),
+            None => target,
+        }
     }
 
     /// Cancels the call.
@@ -782,6 +801,17 @@ impl GrpcCall {
             }
         });
 
+        if let Some(ref shared) = self.channel_shared {
+            let next = match &result {
+                Ok((_, _, _, code, _)) if *code == 14 => {
+                    crate::channel::CHANNEL_TRANSIENT_FAILURE
+                }
+                Ok(_) => crate::channel::CHANNEL_READY,
+                Err(_) => crate::channel::CHANNEL_TRANSIENT_FAILURE,
+            };
+            *shared.state.lock() = next;
+        }
+
         result.map_err(PhpException::from)
     }
 
@@ -1018,6 +1048,7 @@ impl GrpcCall {
         let cancel_token = self.cancel_token.clone();
         let max_decoding = self.max_decoding_message_size;
         let max_encoding = self.max_encoding_message_size;
+        let shared_state = self.channel_shared.clone();
 
         let path = PathAndQuery::try_from(method.as_str()).map_err(|e| {
             PhpException::from(GrpcError::InvalidArg(format!("invalid method path: {e}")))
@@ -1055,6 +1086,16 @@ impl GrpcCall {
             let response = grpc_client
                 .server_streaming(request, path, RawBytesCodec)
                 .await;
+
+            if let Some(ref sh) = shared_state {
+                let next = match &response {
+                    Err(status) if status.code() == tonic::Code::Unavailable => {
+                        crate::channel::CHANNEL_TRANSIENT_FAILURE
+                    }
+                    _ => crate::channel::CHANNEL_READY,
+                };
+                *sh.state.lock() = next;
+            }
 
             match response {
                 Ok(resp) => {
@@ -1163,6 +1204,7 @@ impl GrpcCall {
         let cancel_token = self.cancel_token.clone();
         let max_decoding = self.max_decoding_message_size;
         let max_encoding = self.max_encoding_message_size;
+        let shared_state = self.channel_shared.clone();
 
         let path = PathAndQuery::try_from(method.as_str()).map_err(|e| {
             PhpException::from(GrpcError::InvalidArg(format!("invalid method path: {e}")))
@@ -1217,6 +1259,16 @@ impl GrpcCall {
             }
 
             let response = grpc_client.streaming(request, path, RawBytesCodec).await;
+
+            if let Some(ref sh) = shared_state {
+                let next = match &response {
+                    Err(status) if status.code() == tonic::Code::Unavailable => {
+                        crate::channel::CHANNEL_TRANSIENT_FAILURE
+                    }
+                    _ => crate::channel::CHANNEL_READY,
+                };
+                *sh.state.lock() = next;
+            }
 
             match response {
                 Ok(resp) => {

@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use ext_php_rs::prelude::*;
@@ -10,13 +11,31 @@ use crate::credentials::{CredentialsInner, GrpcChannelCredentials};
 use crate::error::GrpcError;
 use crate::timeval::GrpcTimeval;
 
-/// Connectivity state: idle (initial state).
+/// Connectivity states (Grpc\CHANNEL_* constant values).
 const CHANNEL_IDLE: i64 = 0;
+pub(crate) const CHANNEL_CONNECTING: i64 = 1;
+pub(crate) const CHANNEL_READY: i64 = 2;
+pub(crate) const CHANNEL_TRANSIENT_FAILURE: i64 = 3;
+
+/// Transport + connectivity state shared by every Grpc\Channel object (and
+/// the calls created from them) that refers to the same underlying channel.
+/// Mirrors ext-grpc's persistent channel list: same (target, args, TLS) key
+/// reuses one connection, and it outlives Channel::close() on one wrapper.
+pub(crate) struct SharedChannel {
+    pub(crate) channel: Channel,
+    pub(crate) state: Mutex<i64>,
+}
+
+/// Process-global persistent channel registry, keyed by target + args + TLS
+/// marker. Channels with per-call credentials plugins are NOT persisted
+/// (matching ext-grpc, which excludes call-creds composites); their Zvals
+/// must never cross threads.
+static CHANNEL_REGISTRY: LazyLock<Mutex<HashMap<String, Arc<SharedChannel>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 struct ChannelInner {
-    channel: Channel,
+    shared: Arc<SharedChannel>,
     target: String,
-    state: Mutex<i64>,
     call_plugin: Option<Arc<Mutex<Option<Zval>>>>,
     max_decoding_message_size: Option<usize>,
     max_encoding_message_size: Option<usize>,
@@ -42,6 +61,9 @@ impl GrpcChannel {
 
         // Validate channel args like ext-grpc: string keys, int/string values.
         // 'credentials' and 'force_new' are extracted before validation there.
+        // Also collect a canonical key=value list for the persistence key.
+        let mut force_new = false;
+        let mut persist_parts: Vec<String> = Vec::new();
         for (key, val) in args.iter() {
             let key_str = match &key {
                 ext_php_rs::types::ArrayKey::Long(_) => {
@@ -49,15 +71,25 @@ impl GrpcChannel {
                 }
                 other => other.to_string(),
             };
-            if key_str == "credentials" || key_str == "force_new" {
+            if key_str == "credentials" {
                 continue;
             }
-            if val.long().is_none() && val.string().is_none() {
+            if key_str == "force_new" {
+                force_new = val.bool().unwrap_or(false) || val.long().is_some_and(|l| l != 0);
+                continue;
+            }
+            let val_str = if let Some(l) = val.long() {
+                l.to_string()
+            } else if let Some(s) = val.string() {
+                s
+            } else {
                 return Err(crate::error::invalid_argument(
                     "args values must be int or string",
                 ));
-            }
+            };
+            persist_parts.push(format!("{key_str}={val_str}"));
         }
+        persist_parts.sort();
 
         // Extract credentials from args first — we need to know if TLS is
         // required before building the URI.
@@ -85,6 +117,49 @@ impl GrpcChannel {
                         call_plugin = Some(Arc::clone(plugin));
                     }
                 }
+            }
+        }
+
+        // Extract gRPC message size limits early — needed on both the reuse
+        // and the build path. -1 means unlimited.
+        let max_decoding_message_size = args
+            .get("grpc.max_receive_message_length")
+            .and_then(|v| v.long())
+            .and_then(|v| if v == -1 { Some(usize::MAX) } else if v > 0 { Some(v as usize) } else { None });
+
+        let max_encoding_message_size = args
+            .get("grpc.max_send_message_length")
+            .and_then(|v| v.long())
+            .and_then(|v| if v == -1 { Some(usize::MAX) } else if v > 0 { Some(v as usize) } else { None });
+
+        // Persistent channel reuse (ext-grpc semantics): the same target +
+        // args + TLS kind shares one underlying transport across Channel
+        // objects and requests. Call-credential composites and force_new
+        // channels are never shared.
+        let persist_key = if call_plugin.is_none() && !force_new {
+            Some(format!(
+                "{target}|tls={}|{}",
+                tls_config.is_some(),
+                persist_parts.join(",")
+            ))
+        } else {
+            None
+        };
+
+        if let Some(ref key) = persist_key {
+            let existing = CHANNEL_REGISTRY.lock().get(key).map(Arc::clone);
+            if let Some(shared) = existing {
+                #[allow(clippy::arc_with_non_send_sync)]
+                return Ok(Self {
+                    inner: Some(Arc::new(ChannelInner {
+                        shared,
+                        target,
+                        call_plugin,
+                        max_decoding_message_size,
+                        max_encoding_message_size,
+                    })),
+                    closed_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                });
             }
         }
 
@@ -133,19 +208,6 @@ impl GrpcChannel {
                 .map_err(|e| PhpException::from(GrpcError::InvalidArg(e.to_string())))?;
         }
 
-        // Extract gRPC message size limits (maps to tonic's max_decoding/encoding_message_size).
-        // The C extension uses grpc.max_receive_message_length / grpc.max_send_message_length;
-        // tonic defaults to 4 MiB decoding / unlimited encoding. A value of -1 means unlimited.
-        let max_decoding_message_size = args
-            .get("grpc.max_receive_message_length")
-            .and_then(|v| v.long())
-            .and_then(|v| if v == -1 { Some(usize::MAX) } else if v > 0 { Some(v as usize) } else { None });
-
-        let max_encoding_message_size = args
-            .get("grpc.max_send_message_length")
-            .and_then(|v| v.long())
-            .and_then(|v| if v == -1 { Some(usize::MAX) } else if v > 0 { Some(v as usize) } else { None });
-
         // Apply TLS config.
         // Always call tls_config() when credentials were provided — tonic requires
         // explicit TLS config even for https:// URLs (it doesn't auto-enable).
@@ -162,14 +224,21 @@ impl GrpcChannel {
         // Use connect_lazy to avoid blocking in constructor
         let channel = endpoint.connect_lazy();
 
+        let shared = Arc::new(SharedChannel {
+            channel,
+            state: Mutex::new(CHANNEL_IDLE),
+        });
+        if let Some(key) = persist_key {
+            CHANNEL_REGISTRY.lock().insert(key, Arc::clone(&shared));
+        }
+
         // ChannelInner contains Option<Zval> (via call_plugin) which is !Send,
         // but Arc is needed for shared ownership. All access stays on the PHP thread.
         #[allow(clippy::arc_with_non_send_sync)]
         Ok(Self {
             inner: Some(Arc::new(ChannelInner {
-                channel,
+                shared,
                 target,
-                state: Mutex::new(CHANNEL_IDLE),
                 call_plugin,
                 max_decoding_message_size,
                 max_encoding_message_size,
@@ -203,8 +272,27 @@ impl GrpcChannel {
                 "getConnectivityState error.Channel is already closed.",
             )
         })?;
-        let state = inner.state.lock();
-        Ok(*state)
+        let current = *inner.shared.state.lock();
+
+        // try_to_connect=true on an idle channel kicks off a real connection
+        // attempt; the state transitions IDLE→CONNECTING→READY/TRANSIENT_FAILURE
+        // asynchronously, like C-core.
+        let connect = try_to_connect.and_then(Zval::bool).unwrap_or(false);
+        if connect && current == CHANNEL_IDLE {
+            let shared = Arc::clone(&inner.shared);
+            let rt = crate::runtime::get_runtime().map_err(PhpException::from)?;
+            *shared.state.lock() = CHANNEL_CONNECTING;
+            rt.spawn(async move {
+                let mut grpc = tonic::client::Grpc::new(shared.channel.clone());
+                let next = match grpc.ready().await {
+                    Ok(()) => CHANNEL_READY,
+                    Err(_) => CHANNEL_TRANSIENT_FAILURE,
+                };
+                *shared.state.lock() = next;
+            });
+            return Ok(current);
+        }
+        Ok(current)
     }
 
     /// Watches for a connectivity state change.
@@ -213,17 +301,30 @@ impl GrpcChannel {
     #[php(name = "watchConnectivityState")]
     pub fn watch_connectivity_state(
         &self,
-        _last_state: i64,
-        _deadline: &GrpcTimeval,
+        last_state: i64,
+        deadline: &GrpcTimeval,
     ) -> PhpResult<bool> {
-        let _inner = self.inner.as_ref().ok_or_else(|| {
+        let inner = self.inner.as_ref().ok_or_else(|| {
             crate::error::runtime_exception("watchConnectivityState errorChannel is already closed.")
         })?;
 
-        // Tonic doesn't expose connectivity state watching directly.
-        // For Phase 1, we return true (state changed) immediately.
-        // This matches the common usage pattern where callers just want to proceed.
-        Ok(true)
+        let shared = Arc::clone(&inner.shared);
+        let deadline_usec = deadline.to_absolute_usec();
+        let rt = crate::runtime::get_runtime().map_err(PhpException::from)?;
+
+        loop {
+            if *shared.state.lock() != last_state {
+                return Ok(true);
+            }
+            let now = crate::call::now_usec();
+            if now >= deadline_usec {
+                return Ok(false);
+            }
+            let wait_usec = (deadline_usec.saturating_sub(now)).clamp(1, 10_000);
+            rt.block_on(async {
+                tokio::time::sleep(Duration::from_micros(wait_usec as u64)).await;
+            });
+        }
     }
 
     /// Closes the channel.
@@ -238,7 +339,12 @@ impl GrpcChannel {
 impl GrpcChannel {
     /// Returns the tonic channel (for internal use by Call).
     pub(crate) fn get_tonic_channel(&self) -> Option<Channel> {
-        self.inner.as_ref().map(|i| i.channel.clone())
+        self.inner.as_ref().map(|i| i.shared.channel.clone())
+    }
+
+    /// Returns the shared transport/state handle (for state updates by calls).
+    pub(crate) fn get_shared(&self) -> Option<Arc<SharedChannel>> {
+        self.inner.as_ref().map(|i| Arc::clone(&i.shared))
     }
 
     /// Returns the target URI string.
