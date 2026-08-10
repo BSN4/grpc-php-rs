@@ -423,8 +423,26 @@ impl GrpcCall {
                 if let Some(msg) = batch.send_message {
                     self.send_stream_message(msg)?;
                 }
+            } else if batch.send_close {
+                // The request is complete (message + client half-close), so it
+                // goes on the wire now. UnaryCall::start() and
+                // ServerStreamingCall::start() both land here; holding the
+                // request back until the recv batch would serialise every call
+                // a caller starts concurrently.
+                let mut send_metadata = std::mem::take(&mut self.pending_metadata);
+                send_metadata.extend(batch.send_metadata);
+                let send_message = batch.send_message.or_else(|| self.pending_message.take());
+
+                let mut plugin_metadata = Vec::new();
+                if let Some(ref plugin) = self.call_plugin {
+                    plugin_metadata =
+                        invoke_call_plugin(plugin, &self.method).map_err(PhpException::from)?;
+                }
+
+                self.start_server_stream(send_metadata, plugin_metadata, send_message)?;
             } else {
-                // Buffer for unary or server streaming (existing behavior)
+                // Buffer until the request is complete (client/bidi streaming
+                // opens with a metadata-only batch).
                 self.pending_metadata = batch.send_metadata;
                 self.pending_message = batch.send_message;
 
@@ -933,15 +951,14 @@ impl GrpcCall {
             }
         });
 
-        // Synchronously wait for initial metadata (the stream task sends it
-        // as soon as the server responds with headers).
-        let initial_metadata = rt.block_on(meta_rx).ok();
-
+        // Headers are resolved on demand in build_stream_result. Awaiting them
+        // here would block the PHP thread for a full round trip before start()
+        // returns, which re-serialises calls the caller started concurrently.
         self.stream_state = Some(ActiveStream {
             msg_tx: None,
             msg_rx,
-            initial_metadata,
-            meta_rx: None,
+            initial_metadata: None,
+            meta_rx: Some(meta_rx),
             cached_trailers: None,
             trailers_rx: Some(trailers_rx),
         });
@@ -1135,16 +1152,78 @@ impl GrpcCall {
             .as_mut()
             .ok_or_else(|| PhpException::default("no active stream".into()))?;
 
+        // Resolve every receiver this batch needs in a single runtime entry.
+        // Each block_on costs a park/wake round trip, and a unary recv batch
+        // asks for headers, message and trailers together.
+        let mut msg: Option<Result<Option<Bytes>, tonic::Status>> = None;
+        let mut msg_resolved = false;
+        if batch.recv_message && state.cached_trailers.is_none() {
+            // Fast path: a buffered message needs no runtime entry at all.
+            match state.msg_rx.try_recv() {
+                Ok(m) => {
+                    msg = Some(m);
+                    msg_resolved = true;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    msg_resolved = true;
+                }
+            }
+        }
+
+        let await_meta = batch.recv_initial_metadata && state.initial_metadata.is_none();
+        let await_msg = batch.recv_message && state.cached_trailers.is_none() && !msg_resolved;
+        let await_trailers = batch.recv_status && state.cached_trailers.is_none();
+
+        let mut trailers: Option<StreamTrailers> = None;
+        if await_meta || await_msg || await_trailers {
+            let meta_rx = if await_meta { state.meta_rx.take() } else { None };
+            let trailers_rx = if await_trailers {
+                state.trailers_rx.take()
+            } else {
+                None
+            };
+            let msg_rx = &mut state.msg_rx;
+
+            let (meta_out, msg_out, trailers_out, trailers_rx_unused) =
+                rt.block_on(async move {
+                    let meta = match meta_rx {
+                        Some(rx) => rx.await.ok(),
+                        None => None,
+                    };
+                    let m = if await_msg { msg_rx.recv().await } else { None };
+                    // A mid-stream error carries the final status itself, and
+                    // the task that produced it may never send trailers.
+                    let (t, unused) = match trailers_rx {
+                        Some(rx) if !matches!(m, Some(Err(_))) => (
+                            Some(rx.await.unwrap_or(StreamTrailers {
+                                code: 2, // UNKNOWN
+                                message: "stream task terminated unexpectedly".into(),
+                                metadata: tonic::metadata::MetadataMap::default(),
+                            })),
+                            None,
+                        ),
+                        other => (None, other),
+                    };
+                    (meta, m, t, unused)
+                });
+
+            if await_meta {
+                state.initial_metadata = meta_out;
+            }
+            if await_msg {
+                msg = msg_out;
+            }
+            trailers = trailers_out;
+            if let Some(rx) = trailers_rx_unused {
+                state.trailers_rx = Some(rx);
+            }
+        }
+
         let mut result_obj = ZendObject::new_stdclass();
 
         // RECV_INITIAL_METADATA — resolve deferred or take stored metadata
         if batch.recv_initial_metadata {
-            // If metadata hasn't arrived yet (bidi/client streaming), await it now
-            if state.initial_metadata.is_none()
-                && let Some(rx) = state.meta_rx.take()
-            {
-                state.initial_metadata = rt.block_on(rx).ok();
-            }
             if let Some(ref md) = state.initial_metadata.take() {
                 result_obj
                     .set_property("metadata", metadata_to_php(md).map_err(PhpException::from)?)
@@ -1172,16 +1251,6 @@ impl GrpcCall {
                     },
                 )?;
             } else {
-                // Fast path: a buffered message skips block_on (and its
-                // runtime-context entry + park) entirely.
-                let msg: Option<Result<Option<Bytes>, tonic::Status>> =
-                    match state.msg_rx.try_recv() {
-                        Ok(m) => Some(m),
-                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
-                            rt.block_on(async { state.msg_rx.recv().await })
-                        }
-                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => None,
-                    };
                 match msg {
                     Some(Ok(Some(bytes))) => {
                         let bin: ext_php_rs::binary::Binary<u8> = Vec::from(bytes).into();
@@ -1223,7 +1292,9 @@ impl GrpcCall {
 
         // RECV_STATUS_ON_CLIENT — return final status
         if batch.recv_status {
-            let trailers = if let Some(cached) = state.cached_trailers.take() {
+            let trailers = if let Some(resolved) = trailers.take() {
+                resolved
+            } else if let Some(cached) = state.cached_trailers.take() {
                 cached
             } else if let Some(rx) = state.trailers_rx.take() {
                 rt.block_on(rx).unwrap_or(StreamTrailers {

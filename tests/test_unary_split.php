@@ -4,8 +4,15 @@
  * `UnaryCall::start()` issues a send-only startBatch, `wait()` issues the
  * recv startBatch afterwards.
  *
- * Asserts that results match the single-batch form: message, initial metadata,
- * trailing metadata, status codes, deadline and cancellation.
+ * Two things are asserted:
+ *
+ *   1. Results match the single-batch form (message, initial metadata,
+ *      trailing metadata, status, deadline, cancellation).
+ *   2. Calls started before any of them is awaited overlap on the wire.
+ *      Buffering the request until the recv batch makes a batch of N calls
+ *      cost N round trips instead of one, which is what
+ *      https://github.com/BSN4/grpc-php-rs/issues/18 reported: 100 products
+ *      through the Merchant API took 100-130s instead of 2-5s.
  *
  * Run:
  *   # Terminal 1: cargo run --manifest-path tests/server/Cargo.toml
@@ -140,6 +147,49 @@ try {
 } catch (Throwable $t) {
     check('cancelled call is not OK', true);
 }
+
+// -----------------------------------------------------------------------------
+// Case 8: concurrency — the regression this file exists for.
+//
+// Ten calls against a method that sleeps SLOW_ECHO_DELAY server-side. If the
+// requests go out during start(), the whole batch costs about one delay; if
+// they are buffered until wait(), it costs ten. The threshold sits far from
+// both so a loaded CI runner cannot flip it.
+// -----------------------------------------------------------------------------
+echo "\n--- Case 8: concurrent calls overlap ---\n";
+
+$n = 10;
+$serial = $n * SLOW_ECHO_DELAY;
+$budget = $serial / 2;
+
+$calls = [];
+$t0 = microtime(true);
+for ($i = 0; $i < $n; $i++) {
+    $calls[] = start_unary($channel, '/grpc.testing.TestService/SlowEcho', "msg{$i}");
+}
+$startPhase = microtime(true) - $t0;
+
+$correct = 0;
+foreach ($calls as $i => $call) {
+    $e = wait_unary($call);
+    if (($e->status->code ?? -1) === 0 && ($e->message ?? '') === encode_payload("msg{$i}")) {
+        $correct++;
+    }
+}
+$total = microtime(true) - $t0;
+
+printf("  %d calls, %.2fs total (serialised would be ~%.2fs)\n", $n, $total, $serial);
+check("all {$n} responses correct and in order", $correct === $n, "{$correct}/{$n}");
+check(
+    sprintf('batch completed in under %.2fs', $budget),
+    $total < $budget,
+    sprintf('took %.2fs', $total)
+);
+check(
+    'start() does not block on the response',
+    $startPhase < SLOW_ECHO_DELAY,
+    sprintf('start phase took %.2fs', $startPhase)
+);
 
 // -----------------------------------------------------------------------------
 echo "\n=== {$passed}/{$tests} tests passed ===\n";
