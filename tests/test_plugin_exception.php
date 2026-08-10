@@ -43,7 +43,7 @@ $caught = null;
 try {
     $call->startBatch([
         Grpc\OP_SEND_INITIAL_METADATA  => [],
-        Grpc\OP_SEND_MESSAGE           => "\x0a\x02hi",
+        Grpc\OP_SEND_MESSAGE           => ['message' => "\x0a\x02hi"],
         Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
         Grpc\OP_RECV_INITIAL_METADATA  => true,
         Grpc\OP_RECV_MESSAGE           => true,
@@ -67,7 +67,7 @@ check('original message preserved',
 $call2 = new Grpc\Call($channel, '/grpc.testing.TestService/Echo', Grpc\Timeval::infFuture());
 $r = $call2->startBatch([
     Grpc\OP_SEND_INITIAL_METADATA  => [],
-    Grpc\OP_SEND_MESSAGE           => "\x0a\x02hi",
+    Grpc\OP_SEND_MESSAGE           => ['message' => "\x0a\x02hi"],
     Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
     Grpc\OP_RECV_INITIAL_METADATA  => true,
     Grpc\OP_RECV_MESSAGE           => true,

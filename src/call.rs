@@ -60,6 +60,7 @@ struct ActiveStream {
 /// Parsed operations from the PHP batch array.
 struct BatchOps {
     send_metadata: Vec<(String, String)>,
+    has_send_initial_metadata: bool,
     send_message: Option<Bytes>,
     send_close: bool,
     recv_initial_metadata: bool,
@@ -183,6 +184,42 @@ fn invoke_call_plugin(
     }
 }
 
+/// True when a metadata key is legal per gRPC header rules (the check
+/// ext-grpc applies via `grpc_header_key_is_legal`): non-empty, lowercase
+/// alphanumerics plus `-` `_` `.`.
+fn header_key_is_legal(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+/// Strict parser for OP_SEND_INITIAL_METADATA, matching ext-grpc's
+/// `create_metadata_array`: shape must be `array<string, list<string>>` with
+/// legal header keys; anything else throws InvalidArgumentException.
+/// (Plugin return values go through the lenient `parse_metadata` instead —
+/// their failure mode is a failed call, not a thrown argument error.)
+fn parse_send_metadata(ht: &ZendHashTable) -> PhpResult<Vec<(String, String)>> {
+    let mut metadata = Vec::new();
+    for (key, val) in ht.iter() {
+        let k = array_key_to_string(&key)
+            .ok_or_else(|| crate::error::invalid_argument("Bad metadata value given"))?;
+        if !header_key_is_legal(&k) {
+            return Err(crate::error::invalid_argument("Bad metadata value given"));
+        }
+        let values = val
+            .array()
+            .ok_or_else(|| crate::error::invalid_argument("Bad metadata value given"))?;
+        for (_idx, v) in values.iter() {
+            let s = v
+                .zend_str()
+                .ok_or_else(|| crate::error::invalid_argument("Bad metadata value given"))?;
+            metadata.push((k.clone(), String::from_utf8_lossy(s.as_bytes()).into_owned()));
+        }
+    }
+    Ok(metadata)
+}
+
 /// Parse metadata from a PHP array (ZendHashTable).
 fn parse_metadata(ht: &ZendHashTable) -> Vec<(String, String)> {
     let mut metadata = Vec::new();
@@ -286,9 +323,23 @@ fn bytes_to_php_string_zval(bytes: &[u8]) -> Zval {
 /// to an ordered list of values. ASCII values are surfaced as their raw bytes
 /// (typically printable ASCII). Binary (`-bin`) values are surfaced as the
 /// decoded raw payload in a PHP binary-safe string, matching `ext-grpc`.
+/// Transport/protocol headers that C-core consumes before surfacing metadata
+/// to PHP. tonic leaves them in (response headers wholesale; raw trailer maps
+/// on the success path), so filter at the PHP boundary. Note that
+/// `grpc-status-details-bin` is NOT reserved — ext-grpc surfaces it.
+fn is_reserved_header(key: &str) -> bool {
+    matches!(
+        key,
+        "content-type" | "grpc-status" | "grpc-message" | "grpc-encoding" | "grpc-accept-encoding"
+    )
+}
+
 fn metadata_to_php(map: &tonic::metadata::MetadataMap) -> Result<ZBox<ZendHashTable>, GrpcError> {
     let mut ht = ZendHashTable::new();
     for (key, values) in collect_metadata(map) {
+        if is_reserved_header(&key) {
+            continue;
+        }
         let mut arr = ZendHashTable::new();
         for v in &values {
             arr.push(bytes_to_php_string_zval(v))
@@ -344,6 +395,15 @@ pub struct GrpcCall {
     pending_message: Option<Bytes>,
     /// Whether OP_SEND_CLOSE_FROM_CLIENT has been seen.
     send_closed: bool,
+    /// Whether OP_SEND_INITIAL_METADATA has been seen (a second one is a
+    /// sequencing error, like C-core's GRPC_CALL_ERROR_TOO_MANY_OPERATIONS).
+    initial_metadata_sent: bool,
+    /// Whether a RECV_STATUS_ON_CLIENT has been delivered — the call is over;
+    /// any further batch is a LogicException like ext-grpc (never a re-run).
+    finished: bool,
+    /// Set when the originating PHP Grpc\Channel is closed; startBatch must
+    /// then fail with RuntimeException like ext-grpc.
+    channel_closed: Arc<std::sync::atomic::AtomicBool>,
     /// Active streaming state (None for unary or not yet started).
     stream_state: Option<ActiveStream>,
 }
@@ -358,7 +418,7 @@ impl GrpcCall {
         host_override: Option<String>,
     ) -> PhpResult<Self> {
         let tonic_channel = channel.get_tonic_channel().ok_or_else(|| {
-            PhpException::from(GrpcError::InvalidArg("Channel has been closed".into()))
+            crate::error::invalid_argument("Call cannot be constructed from a closed Channel")
         })?;
 
         let target = channel.get_target_uri().unwrap_or_default();
@@ -371,7 +431,7 @@ impl GrpcCall {
             channel: tonic_channel,
             method,
             target,
-            deadline_usec: deadline.get_usec(),
+            deadline_usec: deadline.to_absolute_usec(),
             host_override,
             call_plugin,
             max_decoding_message_size,
@@ -380,6 +440,9 @@ impl GrpcCall {
             pending_metadata: Vec::new(),
             pending_message: None,
             send_closed: false,
+            initial_metadata_sent: false,
+            finished: false,
+            channel_closed: channel.get_closed_flag(),
             stream_state: None,
         })
     }
@@ -394,6 +457,11 @@ impl GrpcCall {
     /// communicates with PHP via channels. State persists across startBatch calls.
     #[php(name = "startBatch")]
     pub fn start_batch(&mut self, ops: &ZendHashTable) -> PhpResult<ZBox<ZendObject>> {
+        if self.channel_closed.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(crate::error::runtime_exception(
+                "startBatch Error. Channel is closed",
+            ));
+        }
         if self.cancel_token.is_cancelled() {
             return Err(PhpException::from(GrpcError::Status {
                 code: 1, // CANCELLED
@@ -401,13 +469,91 @@ impl GrpcCall {
             }));
         }
 
-        let mut batch = self.parse_ops(ops)?;
+        let batch = self.parse_ops(ops)?;
+
+        // A batch with no recognized ops does nothing (C-core returns OK
+        // without touching the call).
+        if !batch.has_send_ops && !batch.has_recv_ops {
+            return Ok(ZendObject::new_stdclass());
+        }
+
+        // Once RECV_STATUS_ON_CLIENT was delivered the call is over — any
+        // further batch is a sequencing error in ext-grpc, never a re-run.
+        if self.finished {
+            return Err(crate::error::logic_exception(
+                "start_batch was called incorrectly",
+                8, // GRPC_CALL_ERROR_TOO_MANY_OPERATIONS
+            ));
+        }
+
+        if batch.has_send_initial_metadata {
+            if self.initial_metadata_sent {
+                return Err(crate::error::logic_exception(
+                    "start_batch was called incorrectly",
+                    8, // GRPC_CALL_ERROR_TOO_MANY_OPERATIONS
+                ));
+            }
+            self.initial_metadata_sent = true;
+        }
 
         // Track SEND_CLOSE_FROM_CLIENT
         if batch.send_close {
             self.send_closed = true;
         }
 
+        let sent_md = batch.has_send_initial_metadata;
+        let sent_msg = batch.send_message.is_some();
+        let sent_close = batch.send_close;
+        let recv_status = batch.recv_status;
+
+        let mut result_obj = self.dispatch_batch(batch)?;
+
+        if recv_status {
+            self.finished = true;
+        }
+
+        // ext-grpc acks each completed send op with a boolean on the result.
+        for (done, prop) in [
+            (sent_md, "send_metadata"),
+            (sent_msg, "send_message"),
+            (sent_close, "send_close"),
+        ] {
+            if done {
+                result_obj.set_property(prop, true).map_err(
+                    |e: ext_php_rs::error::Error| {
+                        PhpException::default(format!("set {prop}: {e}"))
+                    },
+                )?;
+            }
+        }
+
+        Ok(result_obj)
+    }
+
+    /// Returns the peer URI.
+    #[php(name = "getPeer")]
+    pub fn get_peer(&self) -> String {
+        self.host_override
+            .clone()
+            .unwrap_or_else(|| self.target.clone())
+    }
+
+    /// Cancels the call.
+    pub fn cancel(&mut self) {
+        self.cancel_token.cancel();
+    }
+
+    /// Sets call credentials.
+    #[php(name = "setCredentials")]
+    pub fn set_credentials(&mut self, creds: &GrpcCallCredentials) -> i64 {
+        self.call_plugin = Some(Arc::clone(&creds.plugin));
+        0 // CALL_OK
+    }
+}
+
+impl GrpcCall {
+    /// Route a parsed batch to the unary/streaming machinery.
+    fn dispatch_batch(&mut self, mut batch: BatchOps) -> PhpResult<ZBox<ZendObject>> {
         // ── CASE 1: Send-only batch — buffer, forward to stream, or start bidi ──
         if batch.has_send_ops && !batch.has_recv_ops {
             if self.stream_state.is_some() {
@@ -520,6 +666,7 @@ impl GrpcCall {
             // build_stream_result still uses BatchOps — create a minimal one for the recv flags
             let recv_batch = BatchOps {
                 send_metadata: Vec::new(),
+                has_send_initial_metadata: false,
                 send_message: None,
                 send_close: false,
                 recv_initial_metadata,
@@ -536,28 +683,6 @@ impl GrpcCall {
         self.build_unary_result(recv_initial_metadata, recv_message, recv_status, result)
     }
 
-    /// Returns the peer URI.
-    #[php(name = "getPeer")]
-    pub fn get_peer(&self) -> String {
-        self.host_override
-            .clone()
-            .unwrap_or_else(|| self.target.clone())
-    }
-
-    /// Cancels the call.
-    pub fn cancel(&mut self) {
-        self.cancel_token.cancel();
-    }
-
-    /// Sets call credentials.
-    #[php(name = "setCredentials")]
-    pub fn set_credentials(&mut self, creds: &GrpcCallCredentials) -> i64 {
-        self.call_plugin = Some(Arc::clone(&creds.plugin));
-        0 // CALL_OK
-    }
-}
-
-impl GrpcCall {
     /// Execute the gRPC unary call in the tokio runtime.
     fn execute_call(
         &self,
@@ -664,6 +789,7 @@ impl GrpcCall {
     fn parse_ops(&self, ops: &ZendHashTable) -> PhpResult<BatchOps> {
         let mut batch = BatchOps {
             send_metadata: Vec::new(),
+            has_send_initial_metadata: false,
             send_message: None,
             send_close: false,
             recv_initial_metadata: false,
@@ -679,22 +805,35 @@ impl GrpcCall {
             match op_code {
                 OP_SEND_INITIAL_METADATA => {
                     batch.has_send_ops = true;
-                    if let Some(ht) = val.array() {
-                        batch.send_metadata = parse_metadata(ht);
-                    }
+                    batch.has_send_initial_metadata = true;
+                    let ht = val.array().ok_or_else(|| {
+                        crate::error::invalid_argument("Bad metadata value given")
+                    })?;
+                    batch.send_metadata = parse_send_metadata(ht)?;
                 }
                 OP_SEND_MESSAGE => {
                     batch.has_send_ops = true;
-                    // Protobuf messages are binary — use zend_str() (raw bytes)
-                    // instead of string() which rejects non-UTF-8 data.
-                    if let Some(zs) = val.zend_str() {
-                        batch.send_message = Some(Bytes::copy_from_slice(zs.as_bytes()));
-                    } else if let Some(ht) = val.array()
-                        && let Some(msg_zval) = ht.get("message")
-                        && let Some(zs) = msg_zval.zend_str()
+                    // ext-grpc contract: value must be ['message' => string,
+                    // 'flags' => int (optional)]. Message bytes are binary —
+                    // use zend_str() (raw bytes) instead of string() which
+                    // rejects non-UTF-8 data.
+                    let ht = val.array().ok_or_else(|| {
+                        crate::error::invalid_argument("Expected an array for send message")
+                    })?;
+                    if let Some(flags) = ht.get("flags")
+                        && flags.long().is_none()
                     {
-                        batch.send_message = Some(Bytes::copy_from_slice(zs.as_bytes()));
+                        return Err(crate::error::invalid_argument(
+                            "Expected an int for message flags",
+                        ));
                     }
+                    let zs = ht
+                        .get("message")
+                        .and_then(|z| z.zend_str())
+                        .ok_or_else(|| {
+                            crate::error::invalid_argument("Expected a string for send message")
+                        })?;
+                    batch.send_message = Some(Bytes::copy_from_slice(zs.as_bytes()));
                 }
                 OP_SEND_CLOSE_FROM_CLIENT => {
                     batch.has_send_ops = true;
@@ -713,7 +852,7 @@ impl GrpcCall {
                     batch.recv_status = true;
                 }
                 _ => {
-                    // Silently ignore unknown ops (forward compat)
+                    return Err(crate::error::invalid_argument("Unrecognized key in batch"));
                 }
             }
         }
@@ -769,18 +908,8 @@ impl GrpcCall {
         }
 
         if recv_status {
+            // Property order matches ext-grpc: metadata, code, details.
             let mut status_obj = ZendObject::new_stdclass();
-            status_obj
-                .set_property("code", status_code as i64)
-                .map_err(|e: ext_php_rs::error::Error| {
-                    PhpException::default(format!("set status code: {e}"))
-                })?;
-            status_obj.set_property("details", status_message).map_err(
-                |e: ext_php_rs::error::Error| {
-                    PhpException::default(format!("set status details: {e}"))
-                },
-            )?;
-
             if let Some(ref md) = trailing_metadata {
                 status_obj
                     .set_property("metadata", metadata_to_php(md).map_err(PhpException::from)?)
@@ -794,6 +923,16 @@ impl GrpcCall {
                         PhpException::default(format!("set status metadata: {e}"))
                     })?;
             }
+            status_obj
+                .set_property("code", status_code as i64)
+                .map_err(|e: ext_php_rs::error::Error| {
+                    PhpException::default(format!("set status code: {e}"))
+                })?;
+            status_obj.set_property("details", status_message).map_err(
+                |e: ext_php_rs::error::Error| {
+                    PhpException::default(format!("set status details: {e}"))
+                },
+            )?;
 
             result_obj.set_property("status", status_obj).map_err(
                 |e: ext_php_rs::error::Error| PhpException::default(format!("set status: {e}")),
@@ -1299,7 +1438,16 @@ impl GrpcCall {
                 }
             };
 
+            // Property order matches ext-grpc: metadata, code, details.
             let mut status_obj = ZendObject::new_stdclass();
+            status_obj
+                .set_property(
+                    "metadata",
+                    metadata_to_php(&trailers.metadata).map_err(PhpException::from)?,
+                )
+                .map_err(|e: ext_php_rs::error::Error| {
+                    PhpException::default(format!("set status metadata: {e}"))
+                })?;
             status_obj
                 .set_property("code", trailers.code as i64)
                 .map_err(|e: ext_php_rs::error::Error| {
@@ -1309,14 +1457,6 @@ impl GrpcCall {
                 .set_property("details", trailers.message)
                 .map_err(|e: ext_php_rs::error::Error| {
                     PhpException::default(format!("set status details: {e}"))
-                })?;
-            status_obj
-                .set_property(
-                    "metadata",
-                    metadata_to_php(&trailers.metadata).map_err(PhpException::from)?,
-                )
-                .map_err(|e: ext_php_rs::error::Error| {
-                    PhpException::default(format!("set status metadata: {e}"))
                 })?;
 
             result_obj.set_property("status", status_obj).map_err(

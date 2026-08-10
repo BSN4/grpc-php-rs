@@ -52,7 +52,7 @@ function ledger(string $id, bool $fixed, string $expected, string $current, call
 
 // ═════════════════════════ Call / startBatch layer ═════════════════════════
 
-ledger('send-op-result-booleans', false, 'md=1 msg=1 close=1', 'md= msg= close=', function () {
+ledger('send-op-result-booleans', true, 'md=1 msg=1 close=1', 'md= msg= close=', function () {
     $call = new Grpc\Call(chan(), ECHO_M, dl3());
     $r = $call->startBatch([Grpc\OP_SEND_INITIAL_METADATA=>[], Grpc\OP_SEND_MESSAGE=>['message'=>ep('hi')], Grpc\OP_SEND_CLOSE_FROM_CLIENT=>true]);
     $out = sprintf('md=%s msg=%s close=%s', ($r->send_metadata ?? ''), ($r->send_message ?? ''), ($r->send_close ?? ''));
@@ -60,7 +60,7 @@ ledger('send-op-result-booleans', false, 'md=1 msg=1 close=1', 'md= msg= close='
     return $out;
 });
 
-ledger('success-trailers-clean-split', false, 'keys=', 'keys=grpc-status', function () {
+ledger('success-trailers-clean-split', true, 'keys=', 'keys=grpc-status', function () {
     $call = new Grpc\Call(chan(), ECHO_M, dl3());
     $call->startBatch([Grpc\OP_SEND_INITIAL_METADATA=>[], Grpc\OP_SEND_MESSAGE=>['message'=>ep('hi')], Grpc\OP_SEND_CLOSE_FROM_CLIENT=>true]);
     $s = $call->startBatch([Grpc\OP_RECV_INITIAL_METADATA=>true, Grpc\OP_RECV_MESSAGE=>true, Grpc\OP_RECV_STATUS_ON_CLIENT=>true]);
@@ -69,7 +69,7 @@ ledger('success-trailers-clean-split', false, 'keys=', 'keys=grpc-status', funct
     return 'keys=' . implode(',', $k);
 });
 
-ledger('recv-after-done-errors', false, 'LogicException', 'code=0', function () {
+ledger('recv-after-done-errors', true, 'LogicException', 'code=0', function () {
     $call = new Grpc\Call(chan(), ECHO_M, dl3());
     $call->startBatch(fullBatch());
     return obs(function () use ($call) {
@@ -78,34 +78,34 @@ ledger('recv-after-done-errors', false, 'LogicException', 'code=0', function () 
     });
 });
 
-ledger('initial-md-transport-headers-stripped', false, 'ct=0 gs=0', 'ct=1 gs=1', function () {
+ledger('initial-md-transport-headers-stripped', true, 'ct=0 gs=0', 'ct=1 gs=1', function () {
     $call = new Grpc\Call(chan(), ECHO_M, dl3());
     $r = $call->startBatch(fullBatch());
     $md = (array)$r->metadata;
     return sprintf('ct=%d gs=%d', (int)array_key_exists('content-type', $md), (int)array_key_exists('grpc-status', $md));
 });
 
-ledger('unknown-op-rejected', false, 'InvalidArgumentException', 'accepted', function () {
+ledger('unknown-op-rejected', true, 'InvalidArgumentException', 'accepted', function () {
     $call = new Grpc\Call(chan(), ECHO_M, dl3());
     return obs(function () use ($call) { $call->startBatch([999 => true]); return 'accepted'; });
 });
 
-ledger('bad-metadata-uppercase-key', false, 'InvalidArgumentException', 'accepted', function () {
+ledger('bad-metadata-uppercase-key', true, 'InvalidArgumentException', 'accepted', function () {
     $call = new Grpc\Call(chan(), ECHO_M, dl3());
     return obs(function () use ($call) { $call->startBatch([Grpc\OP_SEND_INITIAL_METADATA => ['UPPER' => ['v']]]); return 'accepted'; });
 });
 
-ledger('bad-metadata-plain-string-value', false, 'InvalidArgumentException', 'accepted', function () {
+ledger('bad-metadata-plain-string-value', true, 'InvalidArgumentException', 'accepted', function () {
     $call = new Grpc\Call(chan(), ECHO_M, dl3());
     return obs(function () use ($call) { $call->startBatch([Grpc\OP_SEND_INITIAL_METADATA => ['k' => 'plain']]); return 'accepted'; });
 });
 
-ledger('bad-metadata-int-key', false, 'InvalidArgumentException', 'accepted', function () {
+ledger('bad-metadata-int-key', true, 'InvalidArgumentException', 'accepted', function () {
     $call = new Grpc\Call(chan(), ECHO_M, dl3());
     return obs(function () use ($call) { $call->startBatch([Grpc\OP_SEND_INITIAL_METADATA => [1 => ['v']]]); return 'accepted'; });
 });
 
-ledger('send-message-bare-string-rejected', false, 'InvalidArgumentException', 'accepted', function () {
+ledger('send-message-bare-string-rejected', true, 'InvalidArgumentException', 'accepted', function () {
     $call = new Grpc\Call(chan(), ECHO_M, dl3());
     return obs(function () use ($call) {
         $call->startBatch([Grpc\OP_SEND_INITIAL_METADATA=>[], Grpc\OP_SEND_MESSAGE=>ep('hi'),
@@ -114,15 +114,16 @@ ledger('send-message-bare-string-rejected', false, 'InvalidArgumentException', '
     });
 });
 
-ledger('send-message-non-string-rejected', false, 'InvalidArgumentException', 'accepted', function () {
+ledger('send-message-non-string-rejected', true, 'InvalidArgumentException', 'accepted', function () {
     $call = new Grpc\Call(chan(), ECHO_M, dl3());
     return obs(function () use ($call) { $call->startBatch([Grpc\OP_SEND_MESSAGE => ['message' => 0]]); return 'accepted'; });
 });
 
-// Intentional divergence: ext-grpc 1.83 HANGS FOREVER on a non-int flags value
-// (reproduced 2026-08-11; C source claims InvalidArgumentException). We accept
-// and ignore the flag. Never emulate the hang; validating would also be fine.
-ledger('flags-bad-type-no-hang', true, 'accepted', 'accepted', function () {
+// Intentional divergence: ext-grpc 1.83 HANGS FOREVER on a non-int flags
+// value (reproduced 2026-08-11; its C source intends
+// InvalidArgumentException). We throw the documented exception instead.
+// Never emulate the hang.
+ledger('flags-bad-type-no-hang', true, 'InvalidArgumentException', 'InvalidArgumentException', function () {
     $call = new Grpc\Call(chan(), ECHO_M, dl3());
     return obs(function () use ($call) {
         $call->startBatch([Grpc\OP_SEND_INITIAL_METADATA=>[], Grpc\OP_SEND_MESSAGE=>['message'=>ep('hi'), 'flags'=>'bad'],
@@ -131,14 +132,14 @@ ledger('flags-bad-type-no-hang', true, 'accepted', 'accepted', function () {
     });
 });
 
-ledger('closed-channel-batch-rejected', false, 'RuntimeException', 'code=0', function () {
+ledger('closed-channel-batch-rejected', true, 'RuntimeException', 'code=0', function () {
     $c = chan();
     $call = new Grpc\Call($c, ECHO_M, dl3());
     $c->close();
     return obs(function () use ($call) { $r = $call->startBatch(fullBatch()); return 'code=' . $r->status->code; });
 });
 
-ledger('ctor-closed-channel-exception-class', false, 'InvalidArgumentException', 'Exception', function () {
+ledger('ctor-closed-channel-exception-class', true, 'InvalidArgumentException', 'Exception', function () {
     $c = chan();
     $c->close();
     return obs(function () use ($c) { new Grpc\Call($c, ECHO_M, dl3()); return 'accepted'; });
@@ -157,7 +158,7 @@ ledger('host-override-not-in-getpeer', false, 'peer', 'override-leaked', functio
     return $call->getPeer() === 'override.example.com' ? 'override-leaked' : 'peer';
 });
 
-ledger('double-send-initial-md-rejected', false, 'LogicException', 'accepted', function () {
+ledger('double-send-initial-md-rejected', true, 'LogicException', 'accepted', function () {
     $call = new Grpc\Call(chan(), ECHO_M, dl3());
     $call->startBatch([Grpc\OP_SEND_INITIAL_METADATA => []]);
     return obs(function () use ($call) { $call->startBatch([Grpc\OP_SEND_INITIAL_METADATA => ['k'=>['v']]]); return 'accepted'; });
@@ -168,7 +169,7 @@ ledger('call-channel-property', false, 'true', 'false', function () {
     return var_export(property_exists($call, 'channel'), true);
 });
 
-ledger('status-property-order', false, 'metadata,code,details', 'code,details,metadata', function () {
+ledger('status-property-order', true, 'metadata,code,details', 'code,details,metadata', function () {
     $call = new Grpc\Call(chan(), ECHO_M, dl3());
     $r = $call->startBatch(fullBatch());
     return implode(',', array_keys((array)$r->status));
@@ -194,7 +195,7 @@ ledger('watch-connectivity-honors-deadline', false, 'deadline-false', 'immediate
     return sprintf('other(r=%s,%.2fs)', var_export($r, true), $elapsed);
 });
 
-ledger('invalid-credentials-rejected', false, 'InvalidArgumentException', 'constructed', function () {
+ledger('invalid-credentials-rejected', true, 'InvalidArgumentException', 'constructed', function () {
     global $TARGET;
     return obs(function () use ($TARGET) {
         new Grpc\Channel($TARGET, ['credentials' => new Grpc\Timeval(100)]);
@@ -210,7 +211,7 @@ ledger('persistent-channel-shared', false, 'a=2 b=2', 'a=0 b=0', function () {
     return sprintf('a=%d b=%d', $a->getConnectivityState(), $b->getConnectivityState());
 });
 
-ledger('channel-args-bool-rejected', false, 'InvalidArgumentException', 'accepted', function () {
+ledger('channel-args-bool-rejected', true, 'InvalidArgumentException', 'accepted', function () {
     global $TARGET;
     return obs(function () use ($TARGET) {
         new Grpc\Channel($TARGET, ['credentials' => null, 'grpc.enable_retries' => true]);
@@ -218,33 +219,33 @@ ledger('channel-args-bool-rejected', false, 'InvalidArgumentException', 'accepte
     });
 });
 
-ledger('call-error-constants', false, 'if=9 tmo=1 aa=0', 'if=8 tmo=0 aa=1', function () {
+ledger('call-error-constants', true, 'if=9 tmo=1 aa=0', 'if=8 tmo=0 aa=1', function () {
     return sprintf('if=%s tmo=%d aa=%d',
         defined('Grpc\CALL_ERROR_INVALID_FLAGS') ? Grpc\CALL_ERROR_INVALID_FLAGS : '-',
         (int)defined('Grpc\CALL_ERROR_TOO_MANY_OPERATIONS'),
         (int)defined('Grpc\CALL_ERROR_ALREADY_ACCEPTED'));
 });
 
-ledger('closed-channel-exception-class', false, 'RuntimeException', 'Exception', function () {
+ledger('closed-channel-exception-class', true, 'RuntimeException', 'Exception', function () {
     $c = chan();
     $c->close();
     return obs(function () use ($c) { $c->getConnectivityState(); return 'ok'; });
 });
 
-ledger('connectivity-state-int-arg-rejected', false, 'InvalidArgumentException', 'accepted', function () {
+ledger('connectivity-state-int-arg-rejected', true, 'InvalidArgumentException', 'accepted', function () {
     $c = chan();
     return obs(function () use ($c) { $c->getConnectivityState(123); return 'accepted'; });
 });
 
-ledger('timeval-float-ctor-coerced', false, 'ok', 'Exception', function () {
+ledger('timeval-float-ctor-coerced', true, 'ok', 'Exception', function () {
     return obs(function () { new Grpc\Timeval(2.5e6); return 'ok'; });
 });
 
-ledger('timeval-sleepuntil-exists', false, 'true', 'false', function () {
+ledger('timeval-sleepuntil-exists', true, 'true', 'false', function () {
     return var_export(method_exists('Grpc\Timeval', 'sleepUntil'), true);
 });
 
-ledger('timeval-infinity-saturation', false, 'compare=0', 'compare=1', function () {
+ledger('timeval-infinity-saturation', true, 'compare=0', 'compare=1', function () {
     $inf = Grpc\Timeval::infFuture();
     return 'compare=' . Grpc\Timeval::compare($inf, $inf->subtract(new Grpc\Timeval(1000)));
 });
@@ -277,7 +278,7 @@ ledger('callcreds-plugin-not-invoked-on-plaintext', false, 'not-invoked', 'invok
     return $seen;
 });
 
-ledger('timeval-methods-no-return-types', false, 'false', 'true', function () {
+ledger('timeval-methods-no-return-types', true, 'false', 'true', function () {
     return var_export((new ReflectionMethod('Grpc\Timeval', 'add'))->hasReturnType(), true);
 });
 

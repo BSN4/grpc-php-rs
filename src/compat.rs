@@ -34,6 +34,26 @@ const CHANNEL_METHODS: &[&str] = &[
 /// Methods on `Grpc\Call` whose return types must be stripped.
 const CALL_METHODS: &[&str] = &["startbatch", "getpeer", "cancel", "setcredentials"];
 
+/// Methods on `Grpc\Timeval` whose return types must be stripped.
+const TIMEVAL_METHODS: &[&str] = &[
+    "getusec", "now", "inffuture", "infpast", "zero", "similar", "compare", "add", "subtract",
+    "sleepuntil",
+];
+
+/// Methods on `Grpc\ChannelCredentials` whose return types must be stripped.
+const CHANNEL_CREDENTIALS_METHODS: &[&str] = &[
+    "createssl",
+    "createinsecure",
+    "createcomposite",
+    "createdefault",
+    "setdefaultrootspem",
+    "isdefaultrootspemset",
+    "invalidatedefaultrootspem",
+];
+
+/// Methods on `Grpc\CallCredentials` whose return types must be stripped.
+const CALL_CREDENTIALS_METHODS: &[&str] = &["createfromplugin", "createcomposite"];
+
 /// RINIT handler — runs each request, but the actual patching happens only once.
 ///
 /// # Safety
@@ -47,6 +67,9 @@ pub unsafe extern "C" fn strip_return_types(_ty: i32, _mod_num: i32) -> i32 {
         unsafe {
             strip_class_methods("Grpc\\Channel", CHANNEL_METHODS);
             strip_class_methods("Grpc\\Call", CALL_METHODS);
+            strip_class_methods("Grpc\\Timeval", TIMEVAL_METHODS);
+            strip_class_methods("Grpc\\ChannelCredentials", CHANNEL_CREDENTIALS_METHODS);
+            strip_class_methods("Grpc\\CallCredentials", CALL_CREDENTIALS_METHODS);
         }
     });
     0

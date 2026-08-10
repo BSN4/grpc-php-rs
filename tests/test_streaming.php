@@ -39,7 +39,7 @@ $call = new Grpc\Call($channel, '/grpc.testing.TestService/StreamEcho', Grpc\Tim
 echo "  Sending request...\n";
 $call->startBatch([
     Grpc\OP_SEND_INITIAL_METADATA => [],
-    Grpc\OP_SEND_MESSAGE          => encode_payload('hello-stream'),
+    Grpc\OP_SEND_MESSAGE          => ['message' => encode_payload('hello-stream')],
     Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
 ]);
 
@@ -109,7 +109,7 @@ $parts = ['aaa', 'bbb', 'ccc'];
 foreach ($parts as $part) {
     echo "  Writing '$part'...\n";
     $call->startBatch([
-        Grpc\OP_SEND_MESSAGE => encode_payload($part),
+        Grpc\OP_SEND_MESSAGE => ['message' => encode_payload($part)],
     ]);
 }
 
@@ -168,7 +168,7 @@ $bidiParts = ['hello', 'world', 'bidi'];
 foreach ($bidiParts as $idx => $part) {
     echo "  Writing '$part'...\n";
     $call->startBatch([
-        Grpc\OP_SEND_MESSAGE => encode_payload($part),
+        Grpc\OP_SEND_MESSAGE => ['message' => encode_payload($part)],
     ]);
 
     $recvOps = [Grpc\OP_RECV_MESSAGE => true];

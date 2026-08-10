@@ -39,7 +39,7 @@ $call = new Grpc\Call($channel, '/grpc.testing.TestService/EmptyResponse', Grpc\
 
 $result = $call->startBatch([
     Grpc\OP_SEND_INITIAL_METADATA  => [],
-    Grpc\OP_SEND_MESSAGE           => encode_payload('test'),
+    Grpc\OP_SEND_MESSAGE           => ['message' => encode_payload('test')],
     Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
     Grpc\OP_RECV_INITIAL_METADATA  => true,
     Grpc\OP_RECV_MESSAGE           => true,

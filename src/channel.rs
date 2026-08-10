@@ -26,6 +26,9 @@ struct ChannelInner {
 #[php(name = "Grpc\\Channel")]
 pub struct GrpcChannel {
     inner: Option<Arc<ChannelInner>>,
+    /// Shared with calls created from this channel so startBatch can reject
+    /// use-after-close like ext-grpc.
+    closed_flag: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[php_impl]
@@ -37,13 +40,37 @@ impl GrpcChannel {
         let mut tls_config = None;
         let mut call_plugin = None;
 
+        // Validate channel args like ext-grpc: string keys, int/string values.
+        // 'credentials' and 'force_new' are extracted before validation there.
+        for (key, val) in args.iter() {
+            let key_str = match &key {
+                ext_php_rs::types::ArrayKey::Long(_) => {
+                    return Err(crate::error::invalid_argument("args keys must be strings"));
+                }
+                other => other.to_string(),
+            };
+            if key_str == "credentials" || key_str == "force_new" {
+                continue;
+            }
+            if val.long().is_none() && val.string().is_none() {
+                return Err(crate::error::invalid_argument(
+                    "args values must be int or string",
+                ));
+            }
+        }
+
         // Extract credentials from args first — we need to know if TLS is
         // required before building the URI.
         if let Some(creds_zval) = args.get("credentials") {
-            // If credentials is null, it means insecure (from createInsecure())
-            if !creds_zval.is_null()
-                && let Some(creds) = creds_zval.extract::<&GrpcChannelCredentials>()
-            {
+            // If credentials is null, it means insecure (from createInsecure());
+            // any other non-ChannelCredentials value is an error, never a
+            // silent plaintext fallback.
+            if !creds_zval.is_null() {
+                let creds = creds_zval.extract::<&GrpcChannelCredentials>().ok_or_else(|| {
+                    crate::error::invalid_argument(
+                        "credentials must be a ChannelCredentials object",
+                    )
+                })?;
                 match &creds.inner {
                     CredentialsInner::Ssl {
                         tls_config: tls_cfg,
@@ -147,26 +174,35 @@ impl GrpcChannel {
                 max_decoding_message_size,
                 max_encoding_message_size,
             })),
+            closed_flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
 
     /// Returns the target URI.
     #[php(name = "getTarget")]
     pub fn get_target(&self) -> PhpResult<String> {
-        let inner = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PhpException::default("Channel has been closed".into()))?;
+        let inner = self.inner.as_ref().ok_or_else(|| {
+            crate::error::runtime_exception("getTarget error.Channel is already closed.")
+        })?;
         Ok(inner.target.clone())
     }
 
     /// Returns the connectivity state.
     #[php(name = "getConnectivityState")]
-    pub fn get_connectivity_state(&self, _try_to_connect: Option<bool>) -> PhpResult<i64> {
-        let inner = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PhpException::default("Channel has been closed".into()))?;
+    pub fn get_connectivity_state(&self, try_to_connect: Option<&Zval>) -> PhpResult<i64> {
+        // ext-grpc rejects non-bool arguments instead of coercing.
+        if let Some(zv) = try_to_connect
+            && zv.bool().is_none()
+        {
+            return Err(crate::error::invalid_argument(
+                "getConnectivityState expects a bool",
+            ));
+        }
+        let inner = self.inner.as_ref().ok_or_else(|| {
+            crate::error::runtime_exception(
+                "getConnectivityState error.Channel is already closed.",
+            )
+        })?;
         let state = inner.state.lock();
         Ok(*state)
     }
@@ -180,10 +216,9 @@ impl GrpcChannel {
         _last_state: i64,
         _deadline: &GrpcTimeval,
     ) -> PhpResult<bool> {
-        let _inner = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PhpException::default("Channel has been closed".into()))?;
+        let _inner = self.inner.as_ref().ok_or_else(|| {
+            crate::error::runtime_exception("watchConnectivityState errorChannel is already closed.")
+        })?;
 
         // Tonic doesn't expose connectivity state watching directly.
         // For Phase 1, we return true (state changed) immediately.
@@ -194,6 +229,8 @@ impl GrpcChannel {
     /// Closes the channel.
     pub fn close(&mut self) {
         self.inner = None;
+        self.closed_flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -207,6 +244,11 @@ impl GrpcChannel {
     /// Returns the target URI string.
     pub(crate) fn get_target_uri(&self) -> Option<String> {
         self.inner.as_ref().map(|i| i.target.clone())
+    }
+
+    /// Shared closed-state flag, observed by calls created from this channel.
+    pub(crate) fn get_closed_flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.closed_flag)
     }
 
     /// Returns the call plugin if composite credentials were used.

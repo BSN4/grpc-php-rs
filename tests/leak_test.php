@@ -66,7 +66,7 @@ function grpc_call(
     // Send: initial metadata + message + close
     $call->startBatch([
         Grpc\OP_SEND_INITIAL_METADATA => $metadata,
-        Grpc\OP_SEND_MESSAGE          => $payload,
+        Grpc\OP_SEND_MESSAGE          => ['message' => $payload],
         Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
     ]);
 

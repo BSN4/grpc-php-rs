@@ -54,7 +54,7 @@ echo "--- Case 1: success response, binary header ---\n";
 $call = new Grpc\Call($channel, '/grpc.testing.TestService/Echo', Grpc\Timeval::infFuture());
 $r1 = $call->startBatch([
     Grpc\OP_SEND_INITIAL_METADATA => [],
-    Grpc\OP_SEND_MESSAGE => encode_payload('hi'),
+    Grpc\OP_SEND_MESSAGE => ['message' => encode_payload('hi')],
     Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
     Grpc\OP_RECV_INITIAL_METADATA => true,
     Grpc\OP_RECV_MESSAGE => true,
@@ -81,7 +81,7 @@ echo "\n--- Case 2: error response, binary trailer ---\n";
 $call = new Grpc\Call($channel, '/grpc.testing.TestService/ErrorResponse', Grpc\Timeval::infFuture());
 $r2 = $call->startBatch([
     Grpc\OP_SEND_INITIAL_METADATA => [],
-    Grpc\OP_SEND_MESSAGE => encode_payload('hi'),
+    Grpc\OP_SEND_MESSAGE => ['message' => encode_payload('hi')],
     Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
     Grpc\OP_RECV_INITIAL_METADATA => true,
     Grpc\OP_RECV_MESSAGE => true,
@@ -108,7 +108,7 @@ echo "\n--- Case 3: streaming error, rich-status trailer ---\n";
 $call = new Grpc\Call($channel, '/grpc.testing.TestService/StreamEcho', Grpc\Timeval::infFuture());
 $call->startBatch([
     Grpc\OP_SEND_INITIAL_METADATA => [],
-    Grpc\OP_SEND_MESSAGE => encode_payload('stream-status-error'),
+    Grpc\OP_SEND_MESSAGE => ['message' => encode_payload('stream-status-error')],
     Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
 ]);
 $call->startBatch([

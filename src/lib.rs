@@ -96,11 +96,13 @@ fn register_constants(_ty: i32, mod_num: i32) -> i32 {
     reg!("Grpc\\CALL_ERROR", 1i64, mod_num);
     reg!("Grpc\\CALL_ERROR_NOT_ON_SERVER", 2i64, mod_num);
     reg!("Grpc\\CALL_ERROR_NOT_ON_CLIENT", 3i64, mod_num);
-    reg!("Grpc\\CALL_ERROR_ALREADY_ACCEPTED", 4i64, mod_num);
+    // ext-grpc registers ALREADY_INVOKED(5)..INVALID_FLAGS(9) but skips
+    // ALREADY_ACCEPTED(4) — match its exact constant surface.
     reg!("Grpc\\CALL_ERROR_ALREADY_INVOKED", 5i64, mod_num);
     reg!("Grpc\\CALL_ERROR_NOT_INVOKED", 6i64, mod_num);
     reg!("Grpc\\CALL_ERROR_ALREADY_FINISHED", 7i64, mod_num);
-    reg!("Grpc\\CALL_ERROR_INVALID_FLAGS", 8i64, mod_num);
+    reg!("Grpc\\CALL_ERROR_TOO_MANY_OPERATIONS", 8i64, mod_num);
+    reg!("Grpc\\CALL_ERROR_INVALID_FLAGS", 9i64, mod_num);
 
     // Batch operation codes
     reg!("Grpc\\OP_SEND_INITIAL_METADATA", 0i64, mod_num);

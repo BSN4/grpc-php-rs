@@ -1,5 +1,30 @@
 use ext_php_rs::exception::PhpException;
-use ext_php_rs::zend::ce;
+use ext_php_rs::zend::{ClassEntry, ce};
+
+/// Build a PhpException with a specific global exception class (SPL or core),
+/// matching ext-grpc's use of InvalidArgumentException / LogicException /
+/// RuntimeException. Falls back to \Exception if the class is not found.
+fn class_exception(class: &str, message: String, code: i32) -> PhpException {
+    let entry = ClassEntry::try_find(class).unwrap_or_else(ce::exception);
+    PhpException::new(message, code, entry)
+}
+
+/// `InvalidArgumentException` with code 1, as thrown by ext-grpc for
+/// argument/validation errors.
+pub fn invalid_argument(message: impl Into<String>) -> PhpException {
+    class_exception("InvalidArgumentException", message.into(), 1)
+}
+
+/// `LogicException` carrying a `grpc_call_error` code, as thrown by ext-grpc
+/// for batch sequencing errors.
+pub fn logic_exception(message: impl Into<String>, call_error: i32) -> PhpException {
+    class_exception("LogicException", message.into(), call_error)
+}
+
+/// `RuntimeException`, as thrown by ext-grpc for closed-resource misuse.
+pub fn runtime_exception(message: impl Into<String>) -> PhpException {
+    class_exception("RuntimeException", message.into(), 0)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum GrpcError {
