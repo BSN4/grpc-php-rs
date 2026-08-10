@@ -140,6 +140,15 @@ COPY tests/test_plugin_exception.php /app/tests/test_plugin_exception.php
 CMD ["sh", "-c", "grpc-test-server & sleep 1 && php tests/test_streaming.php && php tests/test_empty_response.php && php tests/test_plugin_exception.php"]
 
 # ---------------------------------------------------------------------------
+# Stage 9bb: Split-batch unary test runner (start() then wait())
+FROM test-base AS test-unary
+
+COPY --from=test-server-builder /build/target/release/grpc-test-server /usr/local/bin/grpc-test-server
+COPY tests/test_unary_split.php /app/tests/test_unary_split.php
+
+CMD ["sh", "-c", "grpc-test-server & sleep 1 && php tests/test_unary_split.php"]
+
+# ---------------------------------------------------------------------------
 # Stage 9c: Binary trailing metadata test runner
 FROM test-base AS test-binary-trailer
 

@@ -97,6 +97,34 @@ fn array_key_to_long(key: &ArrayKey<'_>) -> Result<i64, GrpcError> {
     }
 }
 
+/// Wall-clock microseconds since the Unix epoch.
+fn now_usec() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0i64, |d| d.as_micros() as i64)
+}
+
+/// Map a tonic status onto the (code, message) pair the C extension reports.
+///
+/// tonic surfaces an expired client deadline as CANCELLED "Timeout expired"
+/// (it maps `TimeoutExpired` that way, dropping the source so the cause cannot
+/// be recovered from the status itself), where ext-grpc reports
+/// DEADLINE_EXCEEDED "Deadline Exceeded". Callers branch on that code —
+/// google/gax retries DEADLINE_EXCEEDED and gives up on CANCELLED — so a
+/// CANCELLED arriving after the deadline we set is reported as the deadline.
+/// Cancellation through `Call::cancel()` never reaches here; it is answered
+/// from the cancellation token instead.
+fn status_to_php(status: &tonic::Status, deadline_usec: i64) -> (i32, String) {
+    let code = status.code() as i32;
+    let deadline_set = deadline_usec > 0 && deadline_usec < i64::MAX;
+
+    if code == tonic::Code::Cancelled as i32 && deadline_set && now_usec() >= deadline_usec {
+        return (4, "Deadline Exceeded".to_string());
+    }
+
+    (code, status.message().to_string())
+}
+
 /// Invoke a CallCredentials plugin callable on the PHP thread.
 ///
 /// Returns a vec of (key, value) metadata pairs.
@@ -555,10 +583,7 @@ impl GrpcCall {
 
             // Apply deadline/timeout
             if deadline_usec < i64::MAX && deadline_usec > 0 {
-                let now_usec = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0i64, |d| d.as_micros() as i64);
-                let timeout_usec = deadline_usec.saturating_sub(now_usec);
+                let timeout_usec = deadline_usec.saturating_sub(now_usec());
                 if timeout_usec > 0 {
                     request.set_timeout(std::time::Duration::from_micros(timeout_usec as u64));
                 }
@@ -587,8 +612,7 @@ impl GrpcCall {
                             Ok((Some(resp_metadata), Some(body), None, 0i32, String::new()))
                         }
                         Err(status) => {
-                            let code = status.code() as i32;
-                            let msg = status.message().to_string();
+                            let (code, msg) = status_to_php(&status, deadline_usec);
                             let md = status_metadata_for_php(&status);
                             Ok((None, None, Some(md), code, msg))
                         }
@@ -775,10 +799,7 @@ impl GrpcCall {
         }
 
         if deadline_usec < i64::MAX && deadline_usec > 0 {
-            let now_usec = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0i64, |d| d.as_micros() as i64);
-            let timeout_usec = deadline_usec.saturating_sub(now_usec);
+            let timeout_usec = deadline_usec.saturating_sub(now_usec());
             if timeout_usec > 0 {
                 request.set_timeout(std::time::Duration::from_micros(timeout_usec as u64));
             }
@@ -872,8 +893,8 @@ impl GrpcCall {
                                         return;
                                     }
                                     Err(status) => {
-                                        let code = status.code() as i32;
-                                        let message = status.message().to_string();
+                                        let (code, message) =
+                                            status_to_php(&status, deadline_usec);
                                         let md = status_metadata_for_php(&status);
                                         let _ = msg_tx.send(Ok(None)).await;
                                         let _ = trailers_tx.send(StreamTrailers {
@@ -900,8 +921,7 @@ impl GrpcCall {
                 Err(status) => {
                     // Connection-level or early error — no stream opened
                     let _ = meta_tx.send(tonic::metadata::MetadataMap::default());
-                    let code = status.code() as i32;
-                    let message = status.message().to_string();
+                    let (code, message) = status_to_php(&status, deadline_usec);
                     let md = status_metadata_for_php(&status);
                     let _ = msg_tx.send(Ok(None)).await;
                     let _ = trailers_tx.send(StreamTrailers {
@@ -970,10 +990,7 @@ impl GrpcCall {
             }
         }
         if deadline_usec < i64::MAX && deadline_usec > 0 {
-            let now_usec = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0i64, |d| d.as_micros() as i64);
-            let timeout_usec = deadline_usec.saturating_sub(now_usec);
+            let timeout_usec = deadline_usec.saturating_sub(now_usec());
             if timeout_usec > 0 {
                 request.set_timeout(std::time::Duration::from_micros(timeout_usec as u64));
             }
@@ -1032,8 +1049,8 @@ impl GrpcCall {
                                         return;
                                     }
                                     Err(status) => {
-                                        let code = status.code() as i32;
-                                        let message = status.message().to_string();
+                                        let (code, message) =
+                                            status_to_php(&status, deadline_usec);
                                         let md = status_metadata_for_php(&status);
                                         let _ = msg_tx.send(Ok(None)).await;
                                         let _ = trailers_tx.send(StreamTrailers {
@@ -1059,8 +1076,7 @@ impl GrpcCall {
                 }
                 Err(status) => {
                     let _ = meta_tx.send(tonic::metadata::MetadataMap::default());
-                    let code = status.code() as i32;
-                    let message = status.message().to_string();
+                    let (code, message) = status_to_php(&status, deadline_usec);
                     let md = status_metadata_for_php(&status);
                     let _ = msg_tx.send(Ok(None)).await;
                     let _ = trailers_tx.send(StreamTrailers {
@@ -1113,6 +1129,7 @@ impl GrpcCall {
     /// Build a PHP result object from the active stream state.
     fn build_stream_result(&mut self, batch: &BatchOps) -> PhpResult<ZBox<ZendObject>> {
         let rt = get_runtime().map_err(PhpException::from)?;
+        let deadline_usec = self.deadline_usec;
         let state = self
             .stream_state
             .as_mut()
@@ -1186,9 +1203,10 @@ impl GrpcCall {
                     }
                     Some(Err(status)) => {
                         // Mid-stream error — cache as trailers, return null message
+                        let (code, message) = status_to_php(&status, deadline_usec);
                         state.cached_trailers = Some(StreamTrailers {
-                            code: status.code() as i32,
-                            message: status.message().to_string(),
+                            code,
+                            message,
                             metadata: status_metadata_for_php(&status),
                         });
                         let mut null_zval = Zval::new();
