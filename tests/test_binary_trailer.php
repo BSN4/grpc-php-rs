@@ -71,9 +71,10 @@ check('echo: byte-exact match (NUL + non-UTF-8 preserved)', $got === $expected,
     'expected=' . bin2hex($expected) . ' got=' . bin2hex($got));
 
 // -----------------------------------------------------------------------------
-// Case 2: Error response, binary metadata attached via Status::with_metadata.
-// This is the path real services use for rich-status (google.rpc.Status over
-// grpc-status-details-bin), surfaces on the trailing-metadata receive path.
+// Case 2: Error response, rich-status bytes attached via Status::with_details.
+// tonic parses the literal reserved `grpc-status-details-bin` header into
+// Status::details(), so this verifies grpc-php-rs restores it to trailing
+// metadata on the PHP receive path.
 // -----------------------------------------------------------------------------
 echo "\n--- Case 2: error response, binary trailer ---\n";
 
@@ -90,11 +91,44 @@ $r2 = $call->startBatch([
 check('error: status INTERNAL', ($r2->status->code ?? -1) === Grpc\STATUS_INTERNAL,
     'code=' . var_export($r2->status->code ?? null, true));
 $trailers = $r2->status->metadata ?? [];
-check('error: x-test-binary-bin in trailing metadata',
-    is_array($trailers) && array_key_exists('x-test-binary-bin', $trailers),
+check('error: grpc-status-details-bin in trailing metadata',
+    is_array($trailers) && array_key_exists('grpc-status-details-bin', $trailers),
     'keys=' . (is_array($trailers) ? implode(',', array_keys($trailers)) : 'null'));
-$got = $trailers['x-test-binary-bin'][0] ?? '';
+$got = $trailers['grpc-status-details-bin'][0] ?? '';
 check('error: byte-exact match (NUL + non-UTF-8 preserved)', $got === $expected,
+    'expected=' . bin2hex($expected) . ' got=' . bin2hex($got));
+
+// -----------------------------------------------------------------------------
+// Case 3: Server-streaming error after response headers. This takes tonic's
+// `Streaming::message()` error path and ensures rich status is restored to the
+// metadata that RECV_STATUS_ON_CLIENT receives.
+// -----------------------------------------------------------------------------
+echo "\n--- Case 3: streaming error, rich-status trailer ---\n";
+
+$call = new Grpc\Call($channel, '/grpc.testing.TestService/StreamEcho', Grpc\Timeval::infFuture());
+$call->startBatch([
+    Grpc\OP_SEND_INITIAL_METADATA => [],
+    Grpc\OP_SEND_MESSAGE => encode_payload('stream-status-error'),
+    Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
+]);
+$call->startBatch([
+    Grpc\OP_RECV_INITIAL_METADATA => true,
+]);
+$streamMessage = $call->startBatch([
+    Grpc\OP_RECV_MESSAGE => true,
+]);
+check('streaming error: message is null', $streamMessage->message === null);
+$streamStatus = $call->startBatch([
+    Grpc\OP_RECV_STATUS_ON_CLIENT => true,
+]);
+check('streaming error: status INTERNAL', ($streamStatus->status->code ?? -1) === Grpc\STATUS_INTERNAL,
+    'code=' . var_export($streamStatus->status->code ?? null, true));
+$streamTrailers = $streamStatus->status->metadata ?? [];
+check('streaming error: grpc-status-details-bin in trailing metadata',
+    is_array($streamTrailers) && array_key_exists('grpc-status-details-bin', $streamTrailers),
+    'keys=' . (is_array($streamTrailers) ? implode(',', array_keys($streamTrailers)) : 'null'));
+$got = $streamTrailers['grpc-status-details-bin'][0] ?? '';
+check('streaming error: byte-exact match (NUL + non-UTF-8 preserved)', $got === $expected,
     'expected=' . bin2hex($expected) . ' got=' . bin2hex($got));
 
 echo "\n=== {$passed}/{$tests} tests passed ===\n";

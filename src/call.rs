@@ -265,6 +265,24 @@ fn metadata_to_php(map: &tonic::metadata::MetadataMap) -> Result<ZBox<ZendHashTa
     Ok(ht)
 }
 
+/// Reconstruct the metadata that ext-grpc exposes for an error status.
+///
+/// tonic treats `grpc-status-details-bin` as a transport header: when it
+/// creates a `Status` from response trailers, it decodes that header into
+/// `Status::details()` and removes it from `Status::metadata()`.  ext-grpc
+/// instead exposes the decoded bytes as ordinary trailing metadata, so put it
+/// back before converting the metadata to PHP.
+fn status_metadata_for_php(status: &tonic::Status) -> tonic::metadata::MetadataMap {
+    let mut metadata = status.metadata().clone();
+    if !status.details().is_empty() {
+        metadata.insert_bin(
+            "grpc-status-details-bin",
+            tonic::metadata::MetadataValue::from_bytes(status.details()),
+        );
+    }
+    metadata
+}
+
 /// Async result from a gRPC call.
 type CallResult = (
     Option<tonic::metadata::MetadataMap>,
@@ -571,7 +589,7 @@ impl GrpcCall {
                         Err(status) => {
                             let code = status.code() as i32;
                             let msg = status.message().to_string();
-                            let md = status.metadata().clone();
+                            let md = status_metadata_for_php(&status);
                             Ok((None, None, Some(md), code, msg))
                         }
                     }
@@ -856,7 +874,7 @@ impl GrpcCall {
                                     Err(status) => {
                                         let code = status.code() as i32;
                                         let message = status.message().to_string();
-                                        let md = status.metadata().clone();
+                                        let md = status_metadata_for_php(&status);
                                         let _ = msg_tx.send(Ok(None)).await;
                                         let _ = trailers_tx.send(StreamTrailers {
                                             code,
@@ -884,7 +902,7 @@ impl GrpcCall {
                     let _ = meta_tx.send(tonic::metadata::MetadataMap::default());
                     let code = status.code() as i32;
                     let message = status.message().to_string();
-                    let md = status.metadata().clone();
+                    let md = status_metadata_for_php(&status);
                     let _ = msg_tx.send(Ok(None)).await;
                     let _ = trailers_tx.send(StreamTrailers {
                         code,
@@ -1016,7 +1034,7 @@ impl GrpcCall {
                                     Err(status) => {
                                         let code = status.code() as i32;
                                         let message = status.message().to_string();
-                                        let md = status.metadata().clone();
+                                        let md = status_metadata_for_php(&status);
                                         let _ = msg_tx.send(Ok(None)).await;
                                         let _ = trailers_tx.send(StreamTrailers {
                                             code,
@@ -1043,7 +1061,7 @@ impl GrpcCall {
                     let _ = meta_tx.send(tonic::metadata::MetadataMap::default());
                     let code = status.code() as i32;
                     let message = status.message().to_string();
-                    let md = status.metadata().clone();
+                    let md = status_metadata_for_php(&status);
                     let _ = msg_tx.send(Ok(None)).await;
                     let _ = trailers_tx.send(StreamTrailers {
                         code,
@@ -1171,7 +1189,7 @@ impl GrpcCall {
                         state.cached_trailers = Some(StreamTrailers {
                             code: status.code() as i32,
                             message: status.message().to_string(),
-                            metadata: status.metadata().clone(),
+                            metadata: status_metadata_for_php(&status),
                         });
                         let mut null_zval = Zval::new();
                         null_zval.set_null();
@@ -1234,7 +1252,7 @@ impl GrpcCall {
 
 #[cfg(test)]
 mod tests {
-    use super::collect_metadata;
+    use super::{collect_metadata, status_metadata_for_php};
     use tonic::metadata::{AsciiMetadataValue, BinaryMetadataValue, MetadataKey, MetadataMap};
 
     /// ASCII metadata is surfaced as raw bytes (the on-wire form), grouped by
@@ -1324,6 +1342,52 @@ mod tests {
             collected
                 .iter()
                 .any(|(k, v)| k == "grpc-status-details-bin" && v == &vec![payload.to_vec()])
+        );
+    }
+
+    /// `Status::from_header_map` removes this reserved header from metadata
+    /// and stores its decoded payload in `Status::details()`. Re-inject it for
+    /// PHP so the observable trailing metadata matches ext-grpc.
+    #[test]
+    fn status_details_bin_is_reinjected_after_tonic_parses_headers() {
+        let payload: &[u8] = b"\x08\x0d\x12\x0brich status";
+        // This is the exact trailer representation emitted by gRPC on the
+        // wire. `CA0SC3JpY2ggc3RhdHVz` is the base64 encoding of `payload`.
+        let mut header_map = http::HeaderMap::new();
+        header_map.insert("grpc-status", http::HeaderValue::from_static("13"));
+        header_map.insert(
+            "grpc-message",
+            http::HeaderValue::from_static("test%20error"),
+        );
+        header_map.insert(
+            "grpc-status-details-bin",
+            http::HeaderValue::from_static("CA0SC3JpY2ggc3RhdHVz"),
+        );
+
+        assert!(
+            header_map.contains_key("grpc-status-details-bin"),
+            "the wire header uses tonic's reserved key"
+        );
+        let status = tonic::Status::from_header_map(&header_map);
+        assert!(status.is_some(), "tonic must parse a status header map");
+        let Some(status) = status else {
+            return;
+        };
+        assert_eq!(status.details(), payload);
+        assert!(
+            status
+                .metadata()
+                .get_bin("grpc-status-details-bin")
+                .is_none(),
+            "tonic removes its reserved header from Status metadata"
+        );
+
+        let collected = collect_metadata(&status_metadata_for_php(&status));
+        assert!(
+            collected.iter().any(|(key, values)| {
+                key == "grpc-status-details-bin" && values == &vec![payload.to_vec()]
+            }),
+            "PHP trailing metadata receives the decoded rich-status payload"
         );
     }
 
