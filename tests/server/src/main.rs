@@ -9,6 +9,10 @@ pub mod pb {
 use pb::test_service_server::{TestService, TestServiceServer};
 use pb::{Empty, Payload};
 
+/// Per-call delay of the SlowEcho method. Kept in sync with the same constant
+/// in tests/test_unary_split.php.
+const SLOW_ECHO_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+
 #[derive(Default)]
 pub struct TestServiceImpl;
 
@@ -31,6 +35,14 @@ impl TestService for TestServiceImpl {
 
     async fn empty_response(&self, _request: Request<Payload>) -> Result<Response<Empty>, Status> {
         Ok(Response::new(Empty {}))
+    }
+
+    /// Echo after a fixed delay, so a client can tell concurrent calls from
+    /// serialised ones: N calls take ~SLOW_ECHO_DELAY when they overlap and
+    /// ~N × SLOW_ECHO_DELAY when they do not.
+    async fn slow_echo(&self, request: Request<Payload>) -> Result<Response<Payload>, Status> {
+        tokio::time::sleep(SLOW_ECHO_DELAY).await;
+        Ok(Response::new(request.into_inner()))
     }
 
     async fn large_response(

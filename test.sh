@@ -30,6 +30,7 @@ Commands:
   firestore   Run Firestore client compatibility test
   leak        Run memory leak test with local gRPC test server
   streaming   Run server streaming test with local gRPC test server
+  unary       Run split-batch unary test with local gRPC test server
   zts         Run ZTS stress test with FrankenPHP + concurrent requests
   temporal    Run Temporal SDK integration test (starts temporalio/auto-setup)
   otel        Run OpenTelemetry integration test (starts otel-collector)
@@ -100,6 +101,13 @@ cmd_streaming() {
     info "Running server streaming test"
     run_target test-streaming
     ok "Server streaming test passed"
+}
+
+cmd_unary() {
+    build_target test-unary
+    info "Running split-batch unary test"
+    run_target test-unary
+    ok "Split-batch unary test passed"
 }
 
 cmd_zts() {
@@ -210,6 +218,8 @@ cmd_all() {
     echo ""
     cmd_streaming
     echo ""
+    cmd_unary
+    echo ""
     cmd_leak
     echo ""
     ok "All tests passed"
@@ -227,6 +237,7 @@ case "$command" in
     firestore)   cmd_firestore ;;
     leak)        cmd_leak ;;
     streaming)   cmd_streaming ;;
+    unary)       cmd_unary ;;
     zts)         cmd_zts ;;
     temporal)    cmd_temporal ;;
     otel)        cmd_otel ;;
