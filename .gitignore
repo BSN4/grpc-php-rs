@@ -6,7 +6,17 @@
 
 # Cargo
 /target/
+tests/server/target/
+tests/server/Cargo.lock
 **/*.rs.bk
+
+# Local debug scripts (not part of the test suite)
+tests/test_firestore.php
+tests/test_firestore_*.php
+!tests/test_firestore_fake.php
+tests/test_*_debug.php
+tests/test_with_roots.php
+tests/Dockerfile.test
 
 # macOS
 .DS_Store
