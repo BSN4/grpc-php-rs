@@ -161,6 +161,16 @@ COPY tests/test_promise_concurrency.php /app/tests/test_promise_concurrency.php
 CMD ["sh", "-c", "grpc-test-server & sleep 1 && php tests/test_promise_concurrency.php"]
 
 # ---------------------------------------------------------------------------
+# Stage 9bd: ext-grpc parity ledger — every known divergence from the official
+# C extension as a strict-xfail case; fails on regressions in either direction.
+FROM test-base AS test-parity-ledger
+
+COPY --from=test-server-builder /build/target/release/grpc-test-server /usr/local/bin/grpc-test-server
+COPY tests/test_ext_grpc_parity.php /app/tests/test_ext_grpc_parity.php
+
+CMD ["sh", "-c", "grpc-test-server & sleep 1 && php tests/test_ext_grpc_parity.php"]
+
+# ---------------------------------------------------------------------------
 # Stage 9c: Binary trailing metadata test runner
 FROM test-base AS test-binary-trailer
 

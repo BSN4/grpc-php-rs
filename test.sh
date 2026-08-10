@@ -32,6 +32,7 @@ Commands:
   streaming   Run server streaming test with local gRPC test server
   unary       Run split-batch unary test with local gRPC test server
   promises    Run gax-style promise concurrency test (grpc/grpc + guzzle)
+  ledger      Run ext-grpc parity ledger (known divergences, strict-xfail)
   parity      Diff observable behavior against official ext-grpc (pecl)
   zts         Run ZTS stress test with FrankenPHP + concurrent requests
   temporal    Run Temporal SDK integration test (starts temporalio/auto-setup)
@@ -117,6 +118,13 @@ cmd_promises() {
     info "Running gax-style promise concurrency test"
     run_target test-promises
     ok "Promise concurrency test passed"
+}
+
+cmd_ledger() {
+    build_target test-parity-ledger
+    info "Running ext-grpc parity ledger"
+    run_target test-parity-ledger
+    ok "Parity ledger consistent"
 }
 
 cmd_parity() {
@@ -250,6 +258,8 @@ cmd_all() {
     echo ""
     cmd_promises
     echo ""
+    cmd_ledger
+    echo ""
     cmd_leak
     echo ""
     ok "All tests passed"
@@ -269,6 +279,7 @@ case "$command" in
     streaming)   cmd_streaming ;;
     unary)       cmd_unary ;;
     promises)    cmd_promises ;;
+    ledger)      cmd_ledger ;;
     parity)      cmd_parity ;;
     zts)         cmd_zts ;;
     temporal)    cmd_temporal ;;
