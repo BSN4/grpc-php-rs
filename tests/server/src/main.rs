@@ -70,11 +70,29 @@ impl TestService for TestServiceImpl {
         let payload = request.into_inner();
         let (tx, rx) = tokio::sync::mpsc::channel(4);
 
+        // A body of "repeat:N" streams N single-byte messages (used by
+        // benchmarks); any other body is echoed back 3 times.
+        let repeat = std::str::from_utf8(&payload.body)
+            .ok()
+            .and_then(|s| s.strip_prefix("repeat:"))
+            .and_then(|n| n.parse::<usize>().ok());
+
         tokio::spawn(async move {
-            // Send the payload back 3 times
-            for _ in 0..3 {
-                if tx.send(Ok(payload.clone())).await.is_err() {
-                    break;
+            match repeat {
+                Some(n) => {
+                    let msg = Payload { body: b"x".to_vec() };
+                    for _ in 0..n {
+                        if tx.send(Ok(msg.clone())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                None => {
+                    for _ in 0..3 {
+                        if tx.send(Ok(payload.clone())).await.is_err() {
+                            break;
+                        }
+                    }
                 }
             }
         });

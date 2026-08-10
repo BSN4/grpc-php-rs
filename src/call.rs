@@ -25,6 +25,12 @@ const OP_RECV_INITIAL_METADATA: i64 = 4;
 const OP_RECV_MESSAGE: i64 = 5;
 const OP_RECV_STATUS_ON_CLIENT: i64 = 6;
 
+/// Response-message buffer between the stream-driving tokio task and the PHP
+/// thread. Capacity 1 forces a park/wake round trip (~10µs) per message, which
+/// dominates high-count streams; a moderate bound lets the driver run ahead
+/// while still applying backpressure (worst case: N × max message size held).
+const STREAM_MSG_BUFFER: usize = 32;
+
 /// Trailing metadata + status from a completed stream.
 struct StreamTrailers {
     code: i32,
@@ -791,9 +797,9 @@ impl GrpcCall {
             deadline_usec,
         );
 
-        // Channels: messages (backpressure buffer=1), initial metadata, trailers
+        // Channels: messages (bounded, see STREAM_MSG_BUFFER), initial metadata, trailers
         let (msg_tx, msg_rx) =
-            tokio::sync::mpsc::channel::<Result<Option<Bytes>, tonic::Status>>(1);
+            tokio::sync::mpsc::channel::<Result<Option<Bytes>, tonic::Status>>(STREAM_MSG_BUFFER);
         let (meta_tx, meta_rx) = tokio::sync::oneshot::channel::<tonic::metadata::MetadataMap>();
         let (trailers_tx, trailers_rx) = tokio::sync::oneshot::channel::<StreamTrailers>();
 
@@ -957,7 +963,7 @@ impl GrpcCall {
 
         // Response channels
         let (msg_tx, msg_rx) =
-            tokio::sync::mpsc::channel::<Result<Option<Bytes>, tonic::Status>>(1);
+            tokio::sync::mpsc::channel::<Result<Option<Bytes>, tonic::Status>>(STREAM_MSG_BUFFER);
         let (meta_tx, meta_rx) = tokio::sync::oneshot::channel::<tonic::metadata::MetadataMap>();
         let (trailers_tx, trailers_rx) = tokio::sync::oneshot::channel::<StreamTrailers>();
 
@@ -1131,8 +1137,16 @@ impl GrpcCall {
                     },
                 )?;
             } else {
+                // Fast path: a buffered message skips block_on (and its
+                // runtime-context entry + park) entirely.
                 let msg: Option<Result<Option<Bytes>, tonic::Status>> =
-                    rt.block_on(async { state.msg_rx.recv().await });
+                    match state.msg_rx.try_recv() {
+                        Ok(m) => Some(m),
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                            rt.block_on(async { state.msg_rx.recv().await })
+                        }
+                        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => None,
+                    };
                 match msg {
                     Some(Ok(Some(bytes))) => {
                         let bin: ext_php_rs::binary::Binary<u8> = Vec::from(bytes).into();
