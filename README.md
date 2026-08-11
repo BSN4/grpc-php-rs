@@ -106,6 +106,14 @@ google-ads-php, Temporal, OpenTelemetry, etcd — run as test suites
 (`./test.sh ecosystem`). Benchmarks against `ext-grpc` are in
 [BENCHMARK.md](BENCHMARK.md) — reproduce them with `./test.sh bench`.
 
+# Charts from production 
+
+<img width="1600" height="608" alt="image" src="https://github.com/user-attachments/assets/1985577f-9288-4711-9386-089d5b75e6ad" />
+<img width="1600" height="608" alt="image" src="https://github.com/user-attachments/assets/d8c18c81-729f-4e3b-b162-ffa56471a5e3" />
+<img width="1600" height="672" alt="image" src="https://github.com/user-attachments/assets/81e2264c-c58d-4f1a-bcc5-fb7d0da3b710" />
+<img width="1600" height="672" alt="image" src="https://github.com/user-attachments/assets/a49a90d4-7432-485e-971d-1e2993702414" />
+
+
 ## Building from Source
 
 Requirements:
