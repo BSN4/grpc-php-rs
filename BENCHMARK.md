@@ -12,32 +12,37 @@ Reproduce with:
 
 ## Results
 
-Measured 2026-08-12 · grpc-php-rs `main` vs ext-grpc 1.83.0 (pecl) · PHP 8.5 ·
+Measured 2026-08-20 · grpc-php-rs `main` vs ext-grpc 1.83.0 (pecl) · PHP 8.5 ·
 both sides in identical `php:8.5-cli` Docker containers with an in-container
 server (loopback). Median of 50 revolutions per scenario (30 for cold, 10+ for
 count=1000, 5 for async). **Ratio < 1.0 means grpc-php-rs is faster.**
 
 | Scenario | grpc-php-rs | ext-grpc | Ratio |
 |---|---:|---:|---:|
-| cold: channel construct + first unary | 378.1 µs | 822.3 µs | **0.46** |
-| unary, split start/wait, 0 B (the gax pattern) | 93.7 µs | 150.0 µs | **0.62** |
-| unary, split start/wait, 1 KB | 99.9 µs | 150.8 µs | **0.66** |
-| unary payload 0 B | 89.6 µs | 142.4 µs | **0.63** |
-| unary payload 100 B | 100.0 µs | 146.5 µs | **0.68** |
-| unary payload 1 KB | 94.7 µs | 148.6 µs | **0.64** |
-| unary payload 10 KB | 102.2 µs | 160.5 µs | **0.64** |
-| unary payload 100 KB | 213.7 µs | 239.8 µs | **0.89** |
-| server stream, 10 messages | 120.2 µs | 198.1 µs | **0.61** |
-| server stream, 100 messages | 370.0 µs | 646.3 µs | **0.57** |
-| server stream, 1000 messages | 3103.6 µs | 5247.2 µs | **0.59** |
-| server stream, 100 B payloads | 118.2 µs | 163.5 µs | **0.72** |
-| server stream, 1 KB payloads | 109.8 µs | 166.5 µs | **0.66** |
-| server stream, 10 KB payloads | 132.5 µs | 178.2 µs | **0.74** |
-| 50 concurrent async unary (250 ms server delay) | 254.8 ms | 257.8 ms | **0.99** |
+| cold: channel construct + first unary | 366.5 µs | 925.1 µs | **0.40** |
+| unary, split start/wait, 0 B (the gax pattern) | 63.4 µs | 154.2 µs | **0.41** |
+| unary, split start/wait, 1 KB | 73.2 µs | 154.2 µs | **0.47** |
+| unary payload 0 B | 72.1 µs | 150.6 µs | **0.48** |
+| unary payload 100 B | 71.2 µs | 150.4 µs | **0.47** |
+| unary payload 1 KB | 71.8 µs | 151.8 µs | **0.47** |
+| unary payload 10 KB | 77.4 µs | 156.7 µs | **0.49** |
+| unary payload 100 KB | 182.1 µs | 230.5 µs | **0.79** |
+| server stream, 10 messages | 97.2 µs | 207.1 µs | **0.47** |
+| server stream, 100 messages | 330.2 µs | 709.6 µs | **0.47** |
+| server stream, 1000 messages | 2540.4 µs | 5516.5 µs | **0.46** |
+| server stream, 100 B payloads | 85.2 µs | 181.9 µs | **0.47** |
+| server stream, 1 KB payloads | 83.2 µs | 181.9 µs | **0.46** |
+| server stream, 10 KB payloads | 94.2 µs | 187.5 µs | **0.50** |
+| 50 concurrent async unary (250 ms server delay) | 255.7 ms | 257.9 ms | **0.99** |
 
-Scenario-to-scenario run variance is roughly ±10% (the cold scenario swings
-more); the 100 KB unary result flips above and below 1.0 across runs and
-should be read as parity.
+Run-to-run variance on this Docker host is real: across repeated full runs of
+the same build the unary ratios have ranged roughly 0.45–0.70 and the cold
+scenario swings more, so read the ratios as "roughly half the latency of
+ext-grpc on small RPCs, parity on 100 KB payloads and the async scenario"
+rather than as exact figures. Every scenario uses at least 30 revolutions (a
+10-revolution median of the 1000-message stream once moved ±20% from host
+noise alone), and the interleaved A/B runs described below are the
+authoritative comparisons for any single change.
 
 ## Large payloads and non-loopback networks
 

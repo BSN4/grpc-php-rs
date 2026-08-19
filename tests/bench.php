@@ -117,7 +117,9 @@ foreach ([0, 100, 1024, 10240, 102400] as $size) {
 
 // ── Server streaming: message-count ladder (1-byte messages) ──
 foreach ([10, 100, 1000] as $count) {
-    scenario("stream_count_{$count}", max(10, intdiv($REVS, ($count >= 1000 ? 5 : 1))), function () use ($warm, $count) {
+    // Never fewer than 30 revolutions: a 10-rev median of a ~2.5 ms scenario
+    // swung ±20% between runs purely from host noise.
+    scenario("stream_count_{$count}", max(30, intdiv($REVS, ($count >= 1000 ? 2 : 1))), function () use ($warm, $count) {
         stream($warm, "repeat:{$count}", $count);
     });
 }
