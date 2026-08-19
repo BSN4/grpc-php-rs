@@ -32,6 +32,7 @@ Commands:
   streaming   Run server streaming test with local gRPC test server
   trailer     Run binary trailing metadata test with local gRPC test server
   unary       Run split-batch unary test with local gRPC test server
+  deadline    Run deadline-covers-connect test (blackholed endpoint, ~30s)
   promises    Run gax-style promise concurrency test (grpc/grpc + guzzle)
   ledger      Run ext-grpc parity ledger (known divergences, strict-xfail)
   bench       Benchmark grpc-php-rs vs official ext-grpc, side by side
@@ -121,6 +122,13 @@ cmd_unary() {
     info "Running split-batch unary test"
     run_target test-unary
     ok "Split-batch unary test passed"
+}
+
+cmd_deadline() {
+    build_target test-deadline-connect
+    info "Running deadline-covers-connect test (blackholed endpoint)"
+    run_target test-deadline-connect
+    ok "Deadline test passed"
 }
 
 cmd_promises() {
@@ -366,6 +374,8 @@ cmd_all() {
     echo ""
     cmd_unary
     echo ""
+    cmd_deadline
+    echo ""
     cmd_promises
     echo ""
     cmd_ledger
@@ -389,6 +399,7 @@ case "$command" in
     streaming)   cmd_streaming ;;
     trailer)     cmd_trailer ;;
     unary)       cmd_unary ;;
+    deadline)    cmd_deadline ;;
     promises)    cmd_promises ;;
     ledger)      cmd_ledger ;;
     bench)       cmd_bench ;;

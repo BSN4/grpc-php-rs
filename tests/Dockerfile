@@ -175,6 +175,14 @@ COPY tests/test_ext_grpc_parity.php /app/tests/test_ext_grpc_parity.php
 CMD ["sh", "-c", "grpc-test-server & sleep 1 && php tests/test_ext_grpc_parity.php"]
 
 # ---------------------------------------------------------------------------
+# Stage 9be: Deadline-covers-connect test — fresh channel to a blackholed
+# endpoint (TEST-NET-1) must fail at the call deadline, not after the kernel's
+# SYN-retry budget. No server needed; needs outbound routing only.
+FROM test-base AS test-deadline-connect
+COPY tests/test_deadline_connect.php /app/tests/test_deadline_connect.php
+CMD ["php", "tests/test_deadline_connect.php"]
+
+# ---------------------------------------------------------------------------
 # Stage 9c: Binary trailing metadata test runner
 FROM test-base AS test-binary-trailer
 

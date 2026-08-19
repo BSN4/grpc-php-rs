@@ -115,6 +115,30 @@ pub(crate) fn now_usec() -> i64 {
 /// CANCELLED arriving after the deadline we set is reported as the deadline.
 /// Cancellation through `Call::cancel()` never reaches here; it is answered
 /// from the cancellation token instead.
+/// The call deadline as a tokio `Instant` (far future when no real deadline is
+/// set). Every await on the dispatch path races against this so the deadline
+/// bounds the WHOLE call — including connection establishment, which tonic's
+/// own timeout layer does not cover (a request waits in the channel buffer for
+/// a connection before any request future, and thus any timeout, exists).
+fn deadline_instant(deadline_usec: i64) -> tokio::time::Instant {
+    if deadline_usec <= 0 || deadline_usec == i64::MAX {
+        // ~30 years out: tokio's timer handles this without overflow and it
+        // is never reached in practice (Instant::far_future is private).
+        return tokio::time::Instant::now() + std::time::Duration::from_secs(86_400 * 365 * 30);
+    }
+    let remaining = deadline_usec.saturating_sub(now_usec()).max(0) as u64;
+    tokio::time::Instant::now() + std::time::Duration::from_micros(remaining)
+}
+
+/// Trailers reported when our own deadline race fires.
+fn deadline_exceeded_trailers() -> StreamTrailers {
+    StreamTrailers {
+        code: 4, // DEADLINE_EXCEEDED
+        message: "Deadline Exceeded".to_string(),
+        metadata: tonic::metadata::MetadataMap::default(),
+    }
+}
+
 /// True when a real deadline is set and has already passed. ext-grpc fails
 /// such calls locally as DEADLINE_EXCEEDED without ever sending the request;
 /// racing a minimal timeout against a fast response is not equivalent.
@@ -771,12 +795,26 @@ impl GrpcCall {
             if let Some(limit) = max_encoding {
                 grpc_client = grpc_client.max_encoding_message_size(limit);
             }
-            grpc_client.ready().await.map_err(GrpcError::Transport)?;
+            let deadline = deadline_instant(deadline_usec);
+            let deadline_exceeded: CallResult = (
+                None,
+                None,
+                Some(tonic::metadata::MetadataMap::default()),
+                4,
+                "Deadline Exceeded".to_string(),
+            );
+
+            // The deadline also bounds connection establishment.
+            match tokio::time::timeout_at(deadline, grpc_client.ready()).await {
+                Ok(ready) => ready.map_err(GrpcError::Transport)?,
+                Err(_elapsed) => return Ok(deadline_exceeded),
+            }
 
             let call_future = grpc_client.unary(request, path, RawBytesCodec);
 
-            // Race the gRPC call against the cancellation token
+            // Race the gRPC call against the cancellation token and the deadline
             tokio::select! {
+                () = tokio::time::sleep_until(deadline) => Ok(deadline_exceeded),
                 response = call_future => {
                     match response {
                         Ok(resp) => {
@@ -1079,16 +1117,41 @@ impl GrpcCall {
             if let Some(limit) = max_encoding {
                 grpc_client = grpc_client.max_encoding_message_size(limit);
             }
-            if let Err(e) = grpc_client.ready().await {
-                let status = tonic::Status::from_error(Box::new(e));
-                let _ = meta_tx.send(tonic::metadata::MetadataMap::default());
-                let _ = msg_tx.send(Err(status)).await;
-                return;
+            let deadline = deadline_instant(deadline_usec);
+            let deadline_sleep = tokio::time::sleep_until(deadline);
+            tokio::pin!(deadline_sleep);
+
+            // The deadline bounds connection establishment too (see deadline_instant).
+            match tokio::time::timeout_at(deadline, grpc_client.ready()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    let status = tonic::Status::from_error(Box::new(e));
+                    let _ = meta_tx.send(tonic::metadata::MetadataMap::default());
+                    let _ = msg_tx.send(Err(status)).await;
+                    return;
+                }
+                Err(_elapsed) => {
+                    let _ = meta_tx.send(tonic::metadata::MetadataMap::default());
+                    let _ = msg_tx.send(Ok(None)).await;
+                    let _ = trailers_tx.send(deadline_exceeded_trailers());
+                    return;
+                }
             }
 
-            let response = grpc_client
-                .server_streaming(request, path, RawBytesCodec)
-                .await;
+            let response = match tokio::time::timeout_at(
+                deadline,
+                grpc_client.server_streaming(request, path, RawBytesCodec),
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(_elapsed) => {
+                    let _ = meta_tx.send(tonic::metadata::MetadataMap::default());
+                    let _ = msg_tx.send(Ok(None)).await;
+                    let _ = trailers_tx.send(deadline_exceeded_trailers());
+                    return;
+                }
+            };
 
             if let Some(ref sh) = shared_state {
                 let next = match &response {
@@ -1151,6 +1214,11 @@ impl GrpcCall {
                                     message: "Call cancelled".into(),
                                     metadata: tonic::metadata::MetadataMap::default(),
                                 });
+                                return;
+                            }
+                            () = &mut deadline_sleep => {
+                                let _ = msg_tx.send(Ok(None)).await;
+                                let _ = trailers_tx.send(deadline_exceeded_trailers());
                                 return;
                             }
                         }
@@ -1254,14 +1322,40 @@ impl GrpcCall {
             if let Some(limit) = max_encoding {
                 grpc_client = grpc_client.max_encoding_message_size(limit);
             }
-            if let Err(e) = grpc_client.ready().await {
-                let status = tonic::Status::from_error(Box::new(e));
-                let _ = meta_tx.send(tonic::metadata::MetadataMap::default());
-                let _ = msg_tx.send(Err(status)).await;
-                return;
+            let deadline = deadline_instant(deadline_usec);
+            let deadline_sleep = tokio::time::sleep_until(deadline);
+            tokio::pin!(deadline_sleep);
+
+            match tokio::time::timeout_at(deadline, grpc_client.ready()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    let status = tonic::Status::from_error(Box::new(e));
+                    let _ = meta_tx.send(tonic::metadata::MetadataMap::default());
+                    let _ = msg_tx.send(Err(status)).await;
+                    return;
+                }
+                Err(_elapsed) => {
+                    let _ = meta_tx.send(tonic::metadata::MetadataMap::default());
+                    let _ = msg_tx.send(Ok(None)).await;
+                    let _ = trailers_tx.send(deadline_exceeded_trailers());
+                    return;
+                }
             }
 
-            let response = grpc_client.streaming(request, path, RawBytesCodec).await;
+            let response = match tokio::time::timeout_at(
+                deadline,
+                grpc_client.streaming(request, path, RawBytesCodec),
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(_elapsed) => {
+                    let _ = meta_tx.send(tonic::metadata::MetadataMap::default());
+                    let _ = msg_tx.send(Ok(None)).await;
+                    let _ = trailers_tx.send(deadline_exceeded_trailers());
+                    return;
+                }
+            };
 
             if let Some(ref sh) = shared_state {
                 let next = match &response {
@@ -1323,6 +1417,11 @@ impl GrpcCall {
                                     message: "Call cancelled".into(),
                                     metadata: tonic::metadata::MetadataMap::default(),
                                 });
+                                return;
+                            }
+                            () = &mut deadline_sleep => {
+                                let _ = msg_tx.send(Ok(None)).await;
+                                let _ = trailers_tx.send(deadline_exceeded_trailers());
                                 return;
                             }
                         }

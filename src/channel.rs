@@ -250,6 +250,13 @@ impl GrpcChannel {
         let rt = crate::runtime::get_runtime().map_err(PhpException::from)?;
         let _guard = rt.enter();
 
+        // Bound each TCP connection attempt. Without this a blackholed endpoint
+        // ties up a call for the kernel's full SYN-retry budget (~2 min on
+        // Linux) even on an infinite-deadline call; C-core's minimum connect
+        // deadline is 20 s. Finite call deadlines are enforced separately in
+        // the call dispatch paths and fire first when shorter.
+        endpoint = endpoint.connect_timeout(Duration::from_secs(20));
+
         // Use connect_lazy to avoid blocking in constructor
         let channel = endpoint.connect_lazy();
 
