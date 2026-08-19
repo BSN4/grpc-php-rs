@@ -33,6 +33,7 @@ Commands:
   trailer     Run binary trailing metadata test with local gRPC test server
   unary       Run split-batch unary test with local gRPC test server
   deadline    Run deadline-covers-connect test (blackholed endpoint, ~30s)
+  lifecycle   Run connection lifecycle test (idle, server restarts, outage)
   promises    Run gax-style promise concurrency test (grpc/grpc + guzzle)
   ledger      Run ext-grpc parity ledger (known divergences, strict-xfail)
   bench       Benchmark grpc-php-rs vs official ext-grpc, side by side
@@ -129,6 +130,13 @@ cmd_deadline() {
     info "Running deadline-covers-connect test (blackholed endpoint)"
     run_target test-deadline-connect
     ok "Deadline test passed"
+}
+
+cmd_lifecycle() {
+    build_target test-lifecycle
+    info "Running connection lifecycle test"
+    run_target test-lifecycle
+    ok "Lifecycle test passed"
 }
 
 cmd_promises() {
@@ -376,6 +384,8 @@ cmd_all() {
     echo ""
     cmd_deadline
     echo ""
+    cmd_lifecycle
+    echo ""
     cmd_promises
     echo ""
     cmd_ledger
@@ -400,6 +410,7 @@ case "$command" in
     trailer)     cmd_trailer ;;
     unary)       cmd_unary ;;
     deadline)    cmd_deadline ;;
+    lifecycle)   cmd_lifecycle ;;
     promises)    cmd_promises ;;
     ledger)      cmd_ledger ;;
     bench)       cmd_bench ;;

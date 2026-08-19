@@ -154,6 +154,15 @@ fn status_to_php(status: &tonic::Status, deadline_usec: i64) -> (i32, String) {
         return (4, "Deadline Exceeded".to_string());
     }
 
+    // tonic reports a transport-level failure it cannot classify (e.g. the
+    // peer closed the connection between calls) as UNKNOWN "transport error".
+    // C-core surfaces every transport failure as UNAVAILABLE, which is what
+    // gax and other retry policies key on. Exact-match the fallback message so
+    // application-level UNKNOWN statuses from servers are never touched.
+    if code == tonic::Code::Unknown as i32 && status.message() == "transport error" {
+        return (14, "transport error".to_string());
+    }
+
     (code, status.message().to_string())
 }
 
@@ -734,6 +743,13 @@ impl GrpcCall {
         send_message: Option<Bytes>,
     ) -> PhpResult<CallResult> {
         let rt = get_runtime().map_err(PhpException::from)?;
+        // Process any I/O that arrived while PHP was outside a call (a server
+        // closing an idle connection, GOAWAY, reconnects) BEFORE dispatching a
+        // new request, so a dead connection is replaced instead of failing it.
+        // The shared multi-thread runtime used to do this in the background;
+        // the per-thread runtime only runs when driven (see runtime.rs). Only
+        // at request dispatch — never on per-message receive batches.
+        crate::runtime::pump().map_err(PhpException::from)?;
 
         let channel = self.channel.clone();
         let method = self.method.clone();
@@ -1077,6 +1093,13 @@ impl GrpcCall {
         send_message: Option<Bytes>,
     ) -> PhpResult<()> {
         let rt = get_runtime().map_err(PhpException::from)?;
+        // Process any I/O that arrived while PHP was outside a call (a server
+        // closing an idle connection, GOAWAY, reconnects) BEFORE dispatching a
+        // new request, so a dead connection is replaced instead of failing it.
+        // The shared multi-thread runtime used to do this in the background;
+        // the per-thread runtime only runs when driven (see runtime.rs). Only
+        // at request dispatch — never on per-message receive batches.
+        crate::runtime::pump().map_err(PhpException::from)?;
 
         if deadline_already_expired(self.deadline_usec) {
             self.stream_state = Some(Self::expired_stream_state());
@@ -1263,6 +1286,13 @@ impl GrpcCall {
         plugin_metadata: Vec<(String, String)>,
     ) -> PhpResult<()> {
         let rt = get_runtime().map_err(PhpException::from)?;
+        // Process any I/O that arrived while PHP was outside a call (a server
+        // closing an idle connection, GOAWAY, reconnects) BEFORE dispatching a
+        // new request, so a dead connection is replaced instead of failing it.
+        // The shared multi-thread runtime used to do this in the background;
+        // the per-thread runtime only runs when driven (see runtime.rs). Only
+        // at request dispatch — never on per-message receive batches.
+        crate::runtime::pump().map_err(PhpException::from)?;
 
         if deadline_already_expired(self.deadline_usec) {
             self.stream_state = Some(Self::expired_stream_state());

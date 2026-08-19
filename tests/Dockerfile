@@ -183,6 +183,17 @@ COPY tests/test_deadline_connect.php /app/tests/test_deadline_connect.php
 CMD ["php", "tests/test_deadline_connect.php"]
 
 # ---------------------------------------------------------------------------
+# Stage 9bf: Connection lifecycle test — restarts/kills the in-container server
+# (needs procps for pidof) to prove reconnect/outage behavior under the
+# per-thread runtime model.
+FROM test-base AS test-lifecycle
+RUN apt-get update && apt-get install -y --no-install-recommends procps \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=test-server-builder /build/target/release/grpc-test-server /usr/local/bin/grpc-test-server
+COPY tests/test_connection_lifecycle.php /app/tests/test_connection_lifecycle.php
+CMD ["sh", "-c", "grpc-test-server >/dev/null 2>&1 & sleep 1 && php tests/test_connection_lifecycle.php"]
+
+# ---------------------------------------------------------------------------
 # Stage 9c: Binary trailing metadata test runner
 FROM test-base AS test-binary-trailer
 
