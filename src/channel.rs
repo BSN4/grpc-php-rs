@@ -1,5 +1,6 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use ext_php_rs::prelude::*;
@@ -26,12 +27,15 @@ pub(crate) struct SharedChannel {
     pub(crate) state: Mutex<i64>,
 }
 
-/// Process-global persistent channel registry, keyed by target + args + TLS
-/// marker. Channels with per-call credentials plugins are NOT persisted
-/// (matching ext-grpc, which excludes call-creds composites); their Zvals
-/// must never cross threads.
-static CHANNEL_REGISTRY: LazyLock<Mutex<HashMap<String, Arc<SharedChannel>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+thread_local! {
+    /// Per-PHP-thread persistent channel registry, keyed by target + args +
+    /// credentials. Thread-local because a channel's connection task lives on
+    /// the runtime of the thread that created it (see runtime.rs) — and PHP
+    /// userland cannot hand objects to another thread anyway. Channels with
+    /// per-call credentials plugins are NOT persisted (matching ext-grpc, which
+    /// excludes call-creds composites).
+    static CHANNEL_REGISTRY: RefCell<HashMap<String, Arc<SharedChannel>>> = RefCell::new(HashMap::new());
+}
 
 struct ChannelInner {
     shared: Arc<SharedChannel>,
@@ -148,7 +152,7 @@ impl GrpcChannel {
         };
 
         if let Some(ref key) = persist_key {
-            let existing = CHANNEL_REGISTRY.lock().get(key).map(Arc::clone);
+            let existing = CHANNEL_REGISTRY.with(|r| r.borrow().get(key).map(Arc::clone));
             if let Some(shared) = existing {
                 #[allow(clippy::arc_with_non_send_sync)]
                 return Ok(Self {
@@ -265,7 +269,7 @@ impl GrpcChannel {
             state: Mutex::new(CHANNEL_IDLE),
         });
         if let Some(key) = persist_key {
-            CHANNEL_REGISTRY.lock().insert(key, Arc::clone(&shared));
+            CHANNEL_REGISTRY.with(|r| r.borrow_mut().insert(key, Arc::clone(&shared)));
         }
 
         // ChannelInner contains Option<Zval> (via call_plugin) which is !Send,
@@ -308,6 +312,9 @@ impl GrpcChannel {
                 "getConnectivityState error.Channel is already closed.",
             )
         })?;
+        // Let in-flight background work (an earlier try_to_connect probe, a
+        // reconnect) progress before reading the state — see runtime::pump.
+        crate::runtime::pump().map_err(PhpException::from)?;
         let current = *inner.shared.state.lock();
 
         // try_to_connect=true on an idle channel kicks off a real connection

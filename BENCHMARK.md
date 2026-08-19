@@ -12,28 +12,28 @@ Reproduce with:
 
 ## Results
 
-Measured 2026-08-11 · grpc-php-rs `main` vs ext-grpc 1.83.0 (pecl) · PHP 8.5 ·
+Measured 2026-08-12 · grpc-php-rs `main` vs ext-grpc 1.83.0 (pecl) · PHP 8.5 ·
 both sides in identical `php:8.5-cli` Docker containers with an in-container
 server (loopback). Median of 50 revolutions per scenario (30 for cold, 10+ for
 count=1000, 5 for async). **Ratio < 1.0 means grpc-php-rs is faster.**
 
 | Scenario | grpc-php-rs | ext-grpc | Ratio |
 |---|---:|---:|---:|
-| cold: channel construct + first unary | 368.4 µs | 902.7 µs | **0.41** |
-| unary, split start/wait, 0 B (the gax pattern) | 127.3 µs | 177.0 µs | **0.72** |
-| unary, split start/wait, 1 KB | 132.2 µs | 148.8 µs | **0.89** |
-| unary payload 0 B | 119.8 µs | 137.1 µs | **0.87** |
-| unary payload 100 B | 122.6 µs | 165.6 µs | **0.74** |
-| unary payload 1 KB | 120.1 µs | 155.6 µs | **0.77** |
-| unary payload 10 KB | 127.2 µs | 160.5 µs | **0.79** |
-| unary payload 100 KB | 258.2 µs | 245.8 µs | 1.05 |
-| server stream, 10 messages | 142.9 µs | 208.0 µs | **0.69** |
-| server stream, 100 messages | 362.5 µs | 662.3 µs | **0.55** |
-| server stream, 1000 messages | 2586.8 µs | 5037.3 µs | **0.51** |
-| server stream, 100 B payloads | 127.9 µs | 167.8 µs | **0.76** |
-| server stream, 1 KB payloads | 128.8 µs | 165.7 µs | **0.78** |
-| server stream, 10 KB payloads | 152.1 µs | 186.2 µs | **0.82** |
-| 50 concurrent async unary (250 ms server delay) | 257.5 ms | 258.1 ms | **1.00** |
+| cold: channel construct + first unary | 378.1 µs | 822.3 µs | **0.46** |
+| unary, split start/wait, 0 B (the gax pattern) | 93.7 µs | 150.0 µs | **0.62** |
+| unary, split start/wait, 1 KB | 99.9 µs | 150.8 µs | **0.66** |
+| unary payload 0 B | 89.6 µs | 142.4 µs | **0.63** |
+| unary payload 100 B | 100.0 µs | 146.5 µs | **0.68** |
+| unary payload 1 KB | 94.7 µs | 148.6 µs | **0.64** |
+| unary payload 10 KB | 102.2 µs | 160.5 µs | **0.64** |
+| unary payload 100 KB | 213.7 µs | 239.8 µs | **0.89** |
+| server stream, 10 messages | 120.2 µs | 198.1 µs | **0.61** |
+| server stream, 100 messages | 370.0 µs | 646.3 µs | **0.57** |
+| server stream, 1000 messages | 3103.6 µs | 5247.2 µs | **0.59** |
+| server stream, 100 B payloads | 118.2 µs | 163.5 µs | **0.72** |
+| server stream, 1 KB payloads | 109.8 µs | 166.5 µs | **0.66** |
+| server stream, 10 KB payloads | 132.5 µs | 178.2 µs | **0.74** |
+| 50 concurrent async unary (250 ms server delay) | 254.8 ms | 257.8 ms | **0.99** |
 
 Scenario-to-scenario run variance is roughly ±10% (the cold scenario swings
 more); the 100 KB unary result flips above and below 1.0 across runs and
@@ -58,28 +58,35 @@ noise, so defaults are unchanged.
 ## Where the CPU goes (Linux `perf`, in-container)
 
 Profiled on the deployment target (Linux, unstripped `grpc.so`), not inferred.
-Per unary RPC we spend ~64 µs CPU to ext-grpc's ~104 µs; per 1000-message
-stream ~2.3 ms to ~8 ms. Of our CPU:
 
-- **~35–50% kernel thread wakeups** (`try_to_wake_up`, `eventfd_write`,
-  `__wake_up_sync_key`): each RPC hops PHP thread → tokio worker → I/O driver
-  → PHP thread, three wakes where C-core's PHP-thread-driven completion queue
-  needs one. This is the threading model, not a bug; removing it would require
-  driving the runtime from the PHP thread, which stalls HTTP/2 connection
-  liveness whenever PHP is busy. Not worth it while we already use less CPU
-  than C-core on every path.
+**Runtime model.** Each PHP thread owns a `current_thread` tokio runtime and
+drives it itself from inside `block_on` while waiting for an RPC (see
+`src/runtime.rs`). The previous design — a shared multi-thread runtime — made
+every RPC hop PHP thread → worker → I/O driver → PHP thread; profiling showed
+35–50% of per-RPC CPU in kernel thread wakeups. Switching models, measured by
+interleaved A/B on the same build: unary 118–140 → 69–71 µs wall, 74–97 → 30–32
+µs CPU; the Firestore-shaped TLS+auth-plugin call 143–152 → 89–90 µs; streaming
+CPU −37%; under FrankenPHP (20 threads) throughput 1129 → 4010 req/s with p99
+21 → 8 ms, because there is no longer a shared runtime or shared connection to
+contend on. Trade-off: nothing progresses while PHP is outside a gRPC call
+(server GOAWAY/PING handled at the next call, worst case one reconnect).
+`GRPC_PHP_RS_RUNTIME=multi-thread` restores the shared runtime.
+
+Per RPC we now spend ~31 µs CPU to ext-grpc's ~104 µs. Of ours: the kernel
+socket path (inherent), h2/tonic framing, and ~5% HPACK Huffman-encoding of
+the auth token (h2 never indexes `authorization`, by policy; C-core sends it
+uncompressed, so our gax-shaped request is still ~20% smaller on the wire).
+**Extension code proper** never exceeds ~3% for any single function.
+
 - **Large receives:** ~16% kernel socket copy + ~25% userspace memcpy (two
   copies: h2 → tonic's decode buffer, then into the PHP string — tonic's
   decoder API makes the first unavoidable). A third copy was removed in
   v0.3.1.
-- **Extension code proper** never exceeds ~3% for any single function on any
-  path (driver loop, batch parsing, metadata conversion).
 
 Things measured and **refuted** on the way (documented so nobody re-proposes
-them by intuition): the split start/wait path is *faster* than single-batch
-(1 vs 2 context switches per RPC), tokio worker count (1/2/default) changes
-nothing, HTTP/2 frame-size/window/adaptive-window tuning is within noise over
-three interleaved rounds.
+them by intuition): HTTP/2 frame-size/window/adaptive-window tuning is within
+noise over three interleaved rounds; mimalloc costs ~10% on small RPCs and
+buys nothing reproducible; glibc malloc threshold tuning hurts large receives.
 
 ## Methodology
 

@@ -48,7 +48,11 @@ cargo build --release # release build (.so at target/release/libgrpc_php_rs.so)
 PHP userland → ext-php-rs entry points → Rust async bridge (tokio) → tonic gRPC → rustls TLS
 ```
 
-- Tokio runtime threads are Rust-managed, NEVER touch PHP allocator
+- Runtime model: one `current_thread` tokio runtime per PHP thread, driven by
+  the PHP thread inside `block_on` (src/runtime.rs). Futures never touch PHP
+  memory; nothing progresses while PHP is outside a gRPC call (by design —
+  measured 2× faster than a shared multi-thread runtime). Never call PHP from
+  inside a future; never nest `block_on`.
 - Only ext-php-rs entry points (on PHP thread) interact with PHP memory
 - CallCredentials plugin callbacks MUST run on PHP thread for TSRM context
 - Extension receives raw protobuf bytes from PHP, forwards as-is (transport layer only)
