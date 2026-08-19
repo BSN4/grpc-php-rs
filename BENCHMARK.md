@@ -55,6 +55,32 @@ HTTP/2 tuning channel args (`grpc.http2.max_frame_size`,
 experimentation; in three interleaved rounds none moved the medians outside
 noise, so defaults are unchanged.
 
+## Where the CPU goes (Linux `perf`, in-container)
+
+Profiled on the deployment target (Linux, unstripped `grpc.so`), not inferred.
+Per unary RPC we spend ~64 µs CPU to ext-grpc's ~104 µs; per 1000-message
+stream ~2.3 ms to ~8 ms. Of our CPU:
+
+- **~35–50% kernel thread wakeups** (`try_to_wake_up`, `eventfd_write`,
+  `__wake_up_sync_key`): each RPC hops PHP thread → tokio worker → I/O driver
+  → PHP thread, three wakes where C-core's PHP-thread-driven completion queue
+  needs one. This is the threading model, not a bug; removing it would require
+  driving the runtime from the PHP thread, which stalls HTTP/2 connection
+  liveness whenever PHP is busy. Not worth it while we already use less CPU
+  than C-core on every path.
+- **Large receives:** ~16% kernel socket copy + ~25% userspace memcpy (two
+  copies: h2 → tonic's decode buffer, then into the PHP string — tonic's
+  decoder API makes the first unavoidable). A third copy was removed in
+  v0.3.1.
+- **Extension code proper** never exceeds ~3% for any single function on any
+  path (driver loop, batch parsing, metadata conversion).
+
+Things measured and **refuted** on the way (documented so nobody re-proposes
+them by intuition): the split start/wait path is *faster* than single-batch
+(1 vs 2 context switches per RPC), tokio worker count (1/2/default) changes
+nothing, HTTP/2 frame-size/window/adaptive-window tuning is within noise over
+three interleaved rounds.
+
 ## Methodology
 
 - **Same code, both sides.** One script (`tests/bench.php`) using only the raw
