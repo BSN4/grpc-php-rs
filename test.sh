@@ -212,6 +212,19 @@ cmd_zts() {
         sleep 0.5
     done
 
+    info "Waiting for the HTTP listener (readiness = a real request succeeds, not just php -r)"
+    retries=60
+    until curl -sf -o /dev/null http://localhost:8099/test_zts_stress.php; do
+        retries=$((retries - 1))
+        if [ "$retries" -le 0 ]; then
+            fail "HTTP listener did not become ready within 30s"
+            docker logs "$CONTAINER" | tail -20
+            docker rm -f "$CONTAINER" 2>/dev/null || true
+            exit 1
+        fi
+        sleep 0.5
+    done
+
     info "Verifying extension loaded in ZTS container"
     docker exec "$CONTAINER" php -r "exit(extension_loaded('grpc') ? 0 : 1);" || {
         fail "grpc extension not loaded in ZTS container"
