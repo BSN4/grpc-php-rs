@@ -94,9 +94,16 @@ impl TestService for TestServiceImpl {
 
     async fn large_response(
         &self,
-        _request: Request<Payload>,
+        request: Request<Payload>,
     ) -> Result<Response<Payload>, Status> {
-        let body = vec![0x42u8; 64 * 1024]; // 64KB
+        // Default 64KB; a body of "size:N" requests N bytes (receive-path
+        // benchmarks need large server->client transfers).
+        let size = std::str::from_utf8(&request.into_inner().body)
+            .ok()
+            .and_then(|s| s.strip_prefix("size:"))
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or(64 * 1024);
+        let body = vec![0x42u8; size];
         Ok(Response::new(Payload {
             body: body.into(),
         }))

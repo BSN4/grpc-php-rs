@@ -200,6 +200,34 @@ impl GrpcChannel {
             *tls = tls.clone().domain_name(name);
         }
 
+        // HTTP/2 transport tuning — the C-core channel args ext-grpc forwards
+        // to grpc core, mapped onto the tonic/hyper equivalents. Unset args
+        // keep hyper's defaults (16 KiB frames, 2 MiB stream / 5 MiB
+        // connection windows, adaptive window off).
+        if let Some(val) = args.get("grpc.http2.max_frame_size")
+            && let Some(n) = val.long()
+            && let Ok(n) = u32::try_from(n)
+            && (16_384..=16_777_215).contains(&n)
+        {
+            endpoint = endpoint.max_frame_size(n);
+        }
+        if let Some(val) = args.get("grpc.http2.lookahead_bytes")
+            && let Some(n) = val.long()
+            && let Ok(n) = u32::try_from(n)
+            && n > 0
+        {
+            // C-core's per-stream lookahead == initial stream window.
+            endpoint = endpoint.initial_stream_window_size(n);
+            // Keep the connection window at least as large as the stream
+            // window, or the stream window cannot be used.
+            endpoint = endpoint.initial_connection_window_size(n.max(5 * 1024 * 1024));
+        }
+        if let Some(val) = args.get("grpc.http2.bdp_probe")
+            && let Some(n) = val.long()
+        {
+            endpoint = endpoint.http2_adaptive_window(n != 0);
+        }
+
         // Extract user agent
         if let Some(val) = args.get("grpc.primary_user_agent")
             && let Some(ua) = val.string()

@@ -19,22 +19,41 @@ count=1000, 5 for async). **Ratio < 1.0 means grpc-php-rs is faster.**
 
 | Scenario | grpc-php-rs | ext-grpc | Ratio |
 |---|---:|---:|---:|
-| cold: channel construct + first unary | 666.9 µs | 806.0 µs | **0.83** |
-| unary payload 0 B | 150.8 µs | 150.1 µs | 1.00 |
-| unary payload 100 B | 136.5 µs | 144.7 µs | **0.94** |
-| unary payload 1 KB | 129.1 µs | 147.4 µs | **0.88** |
-| unary payload 10 KB | 133.8 µs | 153.2 µs | **0.87** |
-| unary payload 100 KB | 257.4 µs | 237.7 µs | 1.08 |
-| server stream, 10 messages | 139.4 µs | 195.7 µs | **0.71** |
-| server stream, 100 messages | 350.6 µs | 641.9 µs | **0.55** |
-| server stream, 1000 messages | 2415.5 µs | 4947.0 µs | **0.49** |
-| server stream, 100 B payloads | 123.6 µs | 169.9 µs | **0.73** |
-| server stream, 1 KB payloads | 127.0 µs | 171.0 µs | **0.74** |
-| server stream, 10 KB payloads | 148.6 µs | 178.9 µs | **0.83** |
-| 50 concurrent async unary (250 ms server delay) | 255.1 ms | 257.0 ms | **0.99** |
+| cold: channel construct + first unary | 368.4 µs | 902.7 µs | **0.41** |
+| unary, split start/wait, 0 B (the gax pattern) | 127.3 µs | 177.0 µs | **0.72** |
+| unary, split start/wait, 1 KB | 132.2 µs | 148.8 µs | **0.89** |
+| unary payload 0 B | 119.8 µs | 137.1 µs | **0.87** |
+| unary payload 100 B | 122.6 µs | 165.6 µs | **0.74** |
+| unary payload 1 KB | 120.1 µs | 155.6 µs | **0.77** |
+| unary payload 10 KB | 127.2 µs | 160.5 µs | **0.79** |
+| unary payload 100 KB | 258.2 µs | 245.8 µs | 1.05 |
+| server stream, 10 messages | 142.9 µs | 208.0 µs | **0.69** |
+| server stream, 100 messages | 362.5 µs | 662.3 µs | **0.55** |
+| server stream, 1000 messages | 2586.8 µs | 5037.3 µs | **0.51** |
+| server stream, 100 B payloads | 127.9 µs | 167.8 µs | **0.76** |
+| server stream, 1 KB payloads | 128.8 µs | 165.7 µs | **0.78** |
+| server stream, 10 KB payloads | 152.1 µs | 186.2 µs | **0.82** |
+| 50 concurrent async unary (250 ms server delay) | 257.5 ms | 258.1 ms | **1.00** |
 
-Scenario-to-scenario run variance is roughly ±10%; the 100 KB unary result
-flips above and below 1.0 across runs and should be read as parity.
+Scenario-to-scenario run variance is roughly ±10% (the cold scenario swings
+more); the 100 KB unary result flips above and below 1.0 across runs and
+should be read as parity.
+
+## Large payloads and non-loopback networks
+
+Measured separately (send-only and receive-only transfers of 1–4 MB, CPU time
+and syscall counts, see the `tests/` probes). On loopback, grpc-php-rs
+receives 1–4 MB messages 15–25% faster than ext-grpc with lower CPU. On a
+higher-latency virtual network path (container → host) large transfers can
+instead run 20–30% slower while still using less CPU: the h2 crate issues one
+`writev` per 16 KB DATA frame on send and reads in ~8 KB chunks on receive,
+where C-core batches ~300 KB per write and ~85 KB per read. That is I/O
+granularity inside h2 (upstream), not extension code; it is invisible on
+loopback (sidecars) and is dwarfed by RTT on real WAN links. The C-core
+HTTP/2 tuning channel args (`grpc.http2.max_frame_size`,
+`grpc.http2.lookahead_bytes`, `grpc.http2.bdp_probe`) are honored for
+experimentation; in three interleaved rounds none moved the medians outside
+noise, so defaults are unchanged.
 
 ## Methodology
 

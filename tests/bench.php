@@ -84,6 +84,29 @@ scenario('cold_channel_unary', min($REVS, 30), function () use (&$cold_i) {
     $ch->close();
 });
 
+// ── Split start()/wait() unary — the google/gax pattern (UnaryCall::start
+// then ->wait). Exercises the eager-dispatch/streaming machinery rather than
+// the single-batch unary path; the delta vs unary_payload_* isolates the
+// per-call cost of the extra PHP<->runtime handoffs.
+function unary_split(Grpc\Channel $ch, string $payload): void {
+    $call = new Grpc\Call($ch, '/grpc.testing.TestService/Echo', Grpc\Timeval::infFuture());
+    $call->startBatch([
+        Grpc\OP_SEND_INITIAL_METADATA => [], Grpc\OP_SEND_MESSAGE => ['message' => ep($payload)],
+        Grpc\OP_SEND_CLOSE_FROM_CLIENT => true,
+    ]);
+    $r = $call->startBatch([
+        Grpc\OP_RECV_INITIAL_METADATA => true, Grpc\OP_RECV_MESSAGE => true,
+        Grpc\OP_RECV_STATUS_ON_CLIENT => true,
+    ]);
+    if ($r->status->code !== 0 || $r->message === null) { fwrite(STDERR, "split unary failed: {$r->status->code}\n"); exit(1); }
+}
+foreach ([0, 1024] as $size) {
+    $payload = $size === 0 ? '' : str_repeat('x', $size);
+    scenario("unary_split_{$size}", $REVS, function () use ($warm, $payload) {
+        unary_split($warm, $payload);
+    });
+}
+
 // ── Warm unary payload ladder ──
 foreach ([0, 100, 1024, 10240, 102400] as $size) {
     $payload = $size === 0 ? '' : str_repeat('x', $size);

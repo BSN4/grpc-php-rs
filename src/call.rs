@@ -920,8 +920,11 @@ impl GrpcCall {
 
         if recv_message {
             if let Some(bytes) = body {
-                let bin: ext_php_rs::binary::Binary<u8> = Vec::from(bytes).into();
-                result_obj.set_property("message", bin).map_err(
+                // Build the zend_string straight from the decoded buffer: one
+                // copy into PHP memory instead of Bytes -> Vec -> zend_string
+                // (the intermediate Vec cost a large malloc + page faults per
+                // message, measurable on MB-scale payloads).
+                result_obj.set_property("message", bytes_to_php_string_zval(&bytes)).map_err(
                     |e: ext_php_rs::error::Error| {
                         PhpException::default(format!("set message: {e}"))
                     },
@@ -1435,8 +1438,8 @@ impl GrpcCall {
                     };
                 match msg {
                     Some(Ok(Some(bytes))) => {
-                        let bin: ext_php_rs::binary::Binary<u8> = Vec::from(bytes).into();
-                        result_obj.set_property("message", bin).map_err(
+                        // Single copy into PHP memory (see build_unary_result).
+                        result_obj.set_property("message", bytes_to_php_string_zval(&bytes)).map_err(
                             |e: ext_php_rs::error::Error| {
                                 PhpException::default(format!("set message: {e}"))
                             },
